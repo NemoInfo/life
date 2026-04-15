@@ -8,6 +8,7 @@ layout (location = 2) in int  particle_type;
 out vec2 out_vertex_pos;
 out vec4 out_vertex_col; 
 
+uniform vec2  u_resolution;
 uniform vec2  u_world_size;
 uniform vec4  u_color_types[%2];
 const float PARTICLE_RADIUS = %1;
@@ -17,9 +18,10 @@ void main() {
   out_vertex_col = u_color_types[particle_type];
 
   vec2 world_pos  = particle_pos + vertex_pos * PARTICLE_RADIUS;
-  vec2 fbo_pos = world_pos + u_world_size * 0.5;
+  vec2 scale   = u_resolution / u_world_size;
+  vec2 fbo_pos = (world_pos + u_world_size * 0.5) * scale;
 
-  vec2 ndc = (fbo_pos / u_world_size ) * 2.0 - 1.0;
+  vec2 ndc = (fbo_pos / u_resolution ) * 2.0 - 1.0;
   ndc.y    = -ndc.y;
   gl_Position = vec4(ndc, 0.0, 1.0);
 }
@@ -39,7 +41,7 @@ void main() {
   if (d > 0.0) discard;
 
   // Soft anti-aliased edge
-  float alpha = 1.0 - smoothstep(-0.005, 0.0, d);
+  float alpha = 1.0 - smoothstep(-0.1, 0.0, d);
   frag_color = vec4(out_vertex_col.rgb, out_vertex_col.a * alpha);
 }
 GLSL
@@ -104,14 +106,20 @@ GLSL
 f32 :: float32;
 f64 :: float64;
 
-PARTICLE_RADIUS :: 2.;
-MAX_PARTICLE_TYPES :: 32;
-NUM_PARTICLE_TYPES :: 5;
-PARTICLE_COLORS : [MAX_PARTICLE_TYPES] Vector4;
-NUM_PARTICLES :: 1200;
+PARTICLE_RADIUS       :: 2.;
+NUM_PARTICLE_TYPES    :: 5;
+MAX_PARTICLE_TYPES    :: 32;
+NUM_PARTICLES         :: 1200;
+PIXELS_PER_WORLD_UNIT :: 10;
+R_MAX                 :: 100.;
+T_HALF                :: 1.5;
+
+A : [NUM_PARTICLE_TYPES][NUM_PARTICLE_TYPES] f32;
+PARTICLE_COLORS    : [MAX_PARTICLE_TYPES] Vector4;
 
 Simulation_State:  : struct {
-  world_size:      Vector2 = .{1800., 1000.};
+  world_size:      Vector2 = .{1920., 1080.};
+  resolution:      Vector2 = #run .{1920., 1080.} * PIXELS_PER_WORLD_UNIT;
   window_size:     Vector2 = .{1920., 1080.};
   dt:              f32;
   time_last_frame: Apollo_Time;
@@ -121,8 +129,8 @@ Simulation_State:  : struct {
 }
 
 Camera_Uniform :: struct {
-  #as using pos:  Vector2;  // world space point at screen centre
-  zoom: f32 = 1.;           // pixels per world unit
+  #as using pos:  Vector2;   // world space point at screen centre
+  zoom: f32 = 1. / PIXELS_PER_WORLD_UNIT; // pixels per world unit
 }
 
 Camera :: struct {
@@ -268,7 +276,7 @@ create_shader_program :: (vert_src: string, frag_src: string) -> GLuint {
     return prog;
 }
 
-create_tile_binding_layout :: (world_size: Vector2) -> Tile_Binding_Layout {
+create_tile_binding_layout :: (resolution: Vector2) -> Tile_Binding_Layout {
   using gl;
   using layout: Tile_Binding_Layout;
 
@@ -276,7 +284,7 @@ create_tile_binding_layout :: (world_size: Vector2) -> Tile_Binding_Layout {
   glGenTextures(1, *world_texture); 
   glBindTexture(GL_TEXTURE_2D, world_texture);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 
-               cast(u32) world_size.x, cast(u32) world_size.y, 
+               cast(u32) resolution.x, cast(u32) resolution.y, 
                0, GL_RGBA, GL_UNSIGNED_BYTE, null);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -323,8 +331,7 @@ tile_render_pass :: (
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, world_texture);
   glUniform1i(glGetUniformLocation(shader, "u_worldTexture"), 0);
-
-  glUniform2f(glGetUniformLocation(shader, "u_worldSize"),  state.world_size.x, state.world_size.y);
+  glUniform2f(glGetUniformLocation(shader, "u_worldSize"),  state.resolution.x, state.resolution.y);
   glUniform2f(glGetUniformLocation(shader, "u_cameraPos"),  camera.pos.x, camera.pos.y);
   glUniform1f(glGetUniformLocation(shader, "u_cameraZoom"), camera.zoom);
   glUniform2f(glGetUniformLocation(shader, "u_windowSize"), state.window_size.x, state.window_size.y);
@@ -382,11 +389,12 @@ world_render_pass :: (
   using gl;
 
   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-  glViewport(0, 0, xx world_size.x, xx world_size.y);
+  glViewport(0, 0, xx resolution.x, xx resolution.y);
   glClearColor(0., 0., 0., 1.);
   glClear(GL_COLOR_BUFFER_BIT);
 
   glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
+  // @TODO: with a dynamic number of particles u have to call glBufferData again
   // glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * instances.count, null, GL_DYNAMIC_DRAW);
   glBufferSubData(GL_ARRAY_BUFFER,  0, xx (size_of(Vector2) * instances.count), instances.pos.data);
 
@@ -396,6 +404,7 @@ world_render_pass :: (
 
   glUseProgram(shader);
   glUniform2f (glGetUniformLocation(shader, "u_world_size"),  world_size.x, world_size.y);
+  glUniform2f (glGetUniformLocation(shader, "u_resolution"),  resolution.x, resolution.y);
   glUniform4fv(glGetUniformLocation(shader, "u_color_types"), MAX_PARTICLE_TYPES, *PARTICLE_COLORS[0].x);
 
   glBindVertexArray(vao);
@@ -407,9 +416,6 @@ world_render_pass :: (
   glBindVertexArray(0);
 }
 
-R_MAX  :: 100.;
-T_HALF :: 1.5;
-A : [NUM_PARTICLE_TYPES][NUM_PARTICLE_TYPES] f32;
 
 init_simulation :: (particles: *Particles, world_size: Vector2) {
   random_seed(transmute(u64, to_seconds(current_time_monotonic())));
@@ -431,7 +437,7 @@ init_simulation :: (particles: *Particles, world_size: Vector2) {
     cast(u8) (random_get() % NUM_PARTICLE_TYPES),
   );
 
-  for *A for *(it.*) it.* = random_get_within_range(-1., 1.);
+  for *A for *(it.*) it.* = random_get_within_range(-1., 1.) * 2.;
   // A = .[.[0.744254, -0.822552, -0.418013, -0.305391, 0.373153], .[0.266228, 0.903647, -0.11726, -0.119418, -0.623262], .[-0.062638, 0.277877, 0.92583, -0.635536, 0.524239], .[0.866223, 0.08902, -0.875463, 0.288696, -0.506347], .[0.846281, -0.477031, 0.351822, 0.487101, 0.738286]];
 }
 
@@ -476,7 +482,7 @@ main :: () {
   init_simulation(*particles, state.world_size);
 
   world_binding_layout := create_world_binding_layout (particles.count);
-  tile_binding_layout  := create_tile_binding_layout(state.world_size);
+  tile_binding_layout  := create_tile_binding_layout(state.resolution);
 
   camera: Camera;
   state.time_last_frame = current_time_monotonic();
@@ -496,8 +502,7 @@ main :: () {
     while SDL_PollEvent(*event) {
       if event.type == {
         case SDL_QUIT; state.exit = true;
-        case SDL_KEYUP;
-          if event.key.keysym.sym == SDLK_ESCAPE state.exit = true;
+        case SDL_KEYUP; if event.key.keysym.sym == SDLK_ESCAPE state.exit = true;
         case SDL_WINDOWEVENT;
           if event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED
             state.window_size = .{xx event.window.data1, xx event.window.data2};
@@ -511,24 +516,25 @@ main :: () {
           if event.button.button == SDL_BUTTON_LEFT camera.is_panning = false;
         case SDL_MOUSEMOTION;
           if camera.is_panning {
-            dm := Vector2.{xx event.motion.x, xx event.motion.y} - camera.pan_start_mouse;
-            camera.pos = camera.pan_start_camera - .{dm.x, -dm.y} / camera.zoom;
-            camera.pos.x = clamp(camera.pos.x, -state.world_size.x / 4, state.world_size.x / 4);
-            camera.pos.y = clamp(camera.pos.y, -state.world_size.y / 4, state.world_size.y / 4);
+            mouse := Vector2.{xx event.motion.x, xx event.motion.y};
+            world_now    := screen_to_world(mouse, state, camera);
+            world_start  := screen_to_world(camera.pan_start_mouse, state, camera);
+            camera.pos    = camera.pan_start_camera + (world_start - world_now);
+            camera.pos.x  = clamp(camera.pos.x, -state.resolution.x/4, state.resolution.x/4);
+            camera.pos.y  = clamp(camera.pos.y, -state.resolution.y/4, state.resolution.y/4);
           }
-        case SDL_MOUSEWHEEL; 
+        case SDL_MOUSEWHEEL;
           mx, my: s32;
           SDL_GetMouseState(*mx, *my);
-          mp: Vector2 = .{xx mx, xx my};
-          mouse_screen := mp - .{xx state.window_size.x, xx state.window_size.y} * 0.5;
-          world_before := camera.pos + mouse_screen / camera.zoom;
+          mouse := Vector2.{xx mx, xx my};
+          world_before := screen_to_world(mouse, state, camera);
           zoom_factor  := ifx event.wheel.y > 0 then 1.1 else 1./1.1;
           camera.zoom  *= zoom_factor;
-          camera.zoom   = clamp(camera.zoom, 0.5, 20.);
-          world_after  := camera.pos + mouse_screen / camera.zoom;
+          camera.zoom   = clamp(camera.zoom, 0.5 / PIXELS_PER_WORLD_UNIT, 20. / PIXELS_PER_WORLD_UNIT);
+          world_after  := screen_to_world(mouse, state, camera);
           camera.pos   += world_before - world_after;
-          camera.pos.x = clamp(camera.pos.x, -state.world_size.x / 4, state.world_size.x / 4);
-          camera.pos.y = clamp(camera.pos.y, -state.world_size.y / 4, state.world_size.y / 4);
+          camera.pos.x  = clamp(camera.pos.x, -state.resolution.x/4, state.resolution.x/4);
+          camera.pos.y  = clamp(camera.pos.y, -state.resolution.y/4, state.resolution.y/4);
       }
     }
 
@@ -548,6 +554,12 @@ main :: () {
   print("A = .%\n", A);
   SDL_DestroyWindow(window);
   SDL_Quit();
+}
+
+screen_to_world :: (screen: Vector2, state: Simulation_State, camera: Camera) -> Vector2 {
+  screen_center := state.window_size * 0.5;
+  offset := (screen - screen_center) / camera.zoom;
+  return camera.pos + .{offset.x, -offset.y};
 }
 
 transmute :: inline ($toT: Type, x: $T) -> toT {
