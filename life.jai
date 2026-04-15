@@ -39,7 +39,7 @@ void main() {
   if (d > 0.0) discard;
 
   // Soft anti-aliased edge
-  float alpha = 1.0 - smoothstep(-0.2, 0.0, d);
+  float alpha = 1.0 - smoothstep(-0.005, 0.0, d);
   frag_color = vec4(out_vertex_col.rgb, out_vertex_col.a * alpha);
 }
 GLSL
@@ -104,11 +104,11 @@ GLSL
 f32 :: float32;
 f64 :: float64;
 
-PARTICLE_RADIUS :: 5.;
+PARTICLE_RADIUS :: 2.;
 MAX_PARTICLE_TYPES :: 32;
 NUM_PARTICLE_TYPES :: 5;
 PARTICLE_COLORS : [MAX_PARTICLE_TYPES] Vector4;
-NUM_PARTICLES :: 500;
+NUM_PARTICLES :: 1200;
 
 Simulation_State:  : struct {
   world_size:      Vector2 = .{1800., 1000.};
@@ -177,7 +177,7 @@ add_particle :: (particles: *Particles, pos: Vector2, vel: Vector2, acc: Vector2
 wrap_particle_instances :: (instances: Particle_Instances, world_size: Vector2) -> Particle_Instances {
   total: Particle_Instances;
 
-  for 0..instances.count/2-1 {
+  for 0..instances.count-1 {
     add_instance(*total, instances.pos[it], instances.type[it]);
     if instances.pos[it].x > world_size.x * 0.5 - PARTICLE_RADIUS
       add_instance(*total, instances.pos[it] - .{world_size.x,0}, instances.type[it]);
@@ -193,26 +193,40 @@ wrap_particle_instances :: (instances: Particle_Instances, world_size: Vector2) 
 }
 
 update_particles :: (using particles: *Particles, using state: Simulation_State) {
-  for 0..count-1 {
-    vel[it] += acc[it] * dt;
-    pos[it] += vel[it] * dt;
-    pos[it].x -= world_size.x * xx (pos[it].x >  world_size.x  * 0.5);
-    pos[it].x += world_size.x * xx (pos[it].x < -world_size.x  * 0.5);
-    pos[it].y -= world_size.y * xx (pos[it].y >  world_size.y * 0.5);
-    pos[it].y += world_size.y * xx (pos[it].y < -world_size.y * 0.5);
+  for i: 0..count-1 {
+    acc[i] = Vector2.{};
+    for j: 0..count-1 {
+      if i == j continue;
+      r       := pos[j] - pos[i];
+      r.x -= world_size.x * xx (r.x >  world_size.x * 0.5);
+      r.x += world_size.x * xx (r.x < -world_size.x * 0.5);
+      r.y -= world_size.y * xx (r.y >  world_size.y * 0.5);
+      r.y += world_size.y * xx (r.y < -world_size.y * 0.5);
+      r_len   := length(r);
+      acc[i] += r / r_len * force(r_len / R_MAX, A[type[i]][type[j]]);
+    }
+    vel[i]    = vel[i] * pow(1./2., dt / T_HALF) + acc[i] * dt;
+    pos[i]   += vel[i] * dt;
+    pos[i].x -= world_size.x * xx (pos[i].x >  world_size.x  * 0.5);
+    pos[i].x += world_size.x * xx (pos[i].x < -world_size.x  * 0.5);
+    pos[i].y -= world_size.y * xx (pos[i].y >  world_size.y * 0.5);
+    pos[i].y += world_size.y * xx (pos[i].y < -world_size.y * 0.5);
   }
 }
 
 // @TODO
 //   ✔  remove radius and maybe color from instance, maybe bake them into the shader?
 //   ✔  implement 2D Camera, switch to world coordonates
-//   3. attraction laws
-//   4. hierarichal structure 
-//   5. gui & tools
+//   ✔  attraction laws
+//   - gui & tools
+//
+// @PERFORMANCE:
+//   - async simulation thread 
+//   - multi-processing for the particle-particle forces , maybe even push to compute shader? 
+//   - hierarichal structure 
 //
 // @QUALITY:
 //   - break the monolith, refactor game loop
-//   - simulation struct, world size, dt
 //   - async logging
 
 compile_shader :: (source: string, shader_type: GLenum) -> GLuint {
@@ -323,7 +337,7 @@ tile_render_pass :: (
   glUseProgram(0);
 }
 
-create_world_binding_layout :: (particles: *Particles) -> World_Binding_Layout {
+create_world_binding_layout :: (particles_count: s64) -> World_Binding_Layout {
     using gl;
     using layout : World_Binding_Layout;
     glGenVertexArrays(1, *vao);
@@ -340,7 +354,7 @@ create_world_binding_layout :: (particles: *Particles) -> World_Binding_Layout {
     // pos stream
     glGenBuffers(1, *pos_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
-    glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * particles.count, null, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * particles_count * 5, null, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, size_of(Vector2), null);
     glVertexAttribDivisor(1, 1);
@@ -348,7 +362,7 @@ create_world_binding_layout :: (particles: *Particles) -> World_Binding_Layout {
     // type stream
     glGenBuffers(1, *type_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
-    glBufferData(GL_ARRAY_BUFFER, size_of(u8) * particles.count, null, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, size_of(u8) * particles_count * 5, null, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(2);
     glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, size_of(u8), null);
     glVertexAttribDivisor(2, 1);
@@ -361,6 +375,7 @@ create_world_binding_layout :: (particles: *Particles) -> World_Binding_Layout {
 world_render_pass :: (
   using layout: *World_Binding_Layout,
   using state:  *Simulation_State,
+  camera: Camera,
   instances:    Particle_Instances,
   framebuffer:  GLuint,
 ) {
@@ -372,9 +387,11 @@ world_render_pass :: (
   glClear(GL_COLOR_BUFFER_BIT);
 
   glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
+  // glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * instances.count, null, GL_DYNAMIC_DRAW);
   glBufferSubData(GL_ARRAY_BUFFER,  0, xx (size_of(Vector2) * instances.count), instances.pos.data);
 
   glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
+  // glBufferData(GL_ARRAY_BUFFER, size_of(u8) * instances.count, null, GL_DYNAMIC_DRAW);
   glBufferSubData(GL_ARRAY_BUFFER,  0, xx (size_of(u8) * instances.count), instances.type.data);
 
   glUseProgram(shader);
@@ -390,6 +407,40 @@ world_render_pass :: (
   glBindVertexArray(0);
 }
 
+R_MAX  :: 100.;
+T_HALF :: 1.5;
+A : [NUM_PARTICLE_TYPES][NUM_PARTICLE_TYPES] f32;
+
+init_simulation :: (particles: *Particles, world_size: Vector2) {
+  random_seed(transmute(u64, to_seconds(current_time_monotonic())));
+
+  for *PARTICLE_COLORS if it_index < NUM_PARTICLE_TYPES
+    it.* = .{
+      random_get_zero_to_one(),
+      random_get_zero_to_one(),
+      random_get_zero_to_one(),
+      1.,
+    };
+
+  for 0..NUM_PARTICLES-1 add_particle(particles, 
+    .{random_get_within_range(-world_size.x/2, world_size.x/2), 
+      random_get_within_range(-world_size.y/2, world_size.y/2)},
+    .{random_get_within_range(-10., 10.), 
+      random_get_within_range(-10., 10.)},
+    .{0,0},
+    cast(u8) (random_get() % NUM_PARTICLE_TYPES),
+  );
+
+  for *A for *(it.*) it.* = random_get_within_range(-1., 1.);
+  // A = .[.[0.744254, -0.822552, -0.418013, -0.305391, 0.373153], .[0.266228, 0.903647, -0.11726, -0.119418, -0.623262], .[-0.062638, 0.277877, 0.92583, -0.635536, 0.524239], .[0.866223, 0.08902, -0.875463, 0.288696, -0.506347], .[0.846281, -0.477031, 0.351822, 0.487101, 0.738286]];
+}
+
+force :: (r: f32, a: f32, beta: f32 = 0.3) -> f32 {
+  if r < beta return r / beta - 1.;
+  if r < 1.   return a * (1. - abs(2.*r-1-beta)/(1-beta));
+  return 0.;
+}
+
 main :: () {
   setenv("__NV_PRIME_RENDER_OFFLOAD",  "1",       1);
   setenv("__GLX_VENDOR_LIBRARY_NAME",  "nvidia",  1);
@@ -397,7 +448,7 @@ main :: () {
 
   SDL_Init(SDL_INIT_VIDEO);
   state: Simulation_State;
-  window := SDL_CreateWindow("An SDL2 window", -1920, 0, xx state.window_size.x, xx state.window_size.y, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE);
+  window := SDL_CreateWindow("An SDL2 window", 0, 0, xx state.window_size.x, xx state.window_size.y, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN);
 
   if window == null {
     print("Could not create window: %\n", to_string(SDL_GetError()));
@@ -422,27 +473,9 @@ main :: () {
   print("GL Renderer = %\n", to_string(glGetString(GL_RENDERER)));
 
   particles: Particles;
-  random_seed(transmute(u64, to_seconds(current_time_monotonic())));
+  init_simulation(*particles, state.world_size);
 
-  for *PARTICLE_COLORS if it_index < NUM_PARTICLE_TYPES
-    it.* = .{
-      random_get_zero_to_one(),
-      random_get_zero_to_one(),
-      random_get_zero_to_one(),
-      1.,
-    };
-
-  for 0..NUM_PARTICLES-1 add_particle(*particles, 
-    .{random_get_within_range(-state.world_size.x/2, state.world_size.x/2), 
-      random_get_within_range(-state.world_size.y/2, state.world_size.y/2)},
-    .{random_get_within_range(-100., 100.), 
-      random_get_within_range(-100., 100.)},
-    .{random_get_within_range(-10., 10.), 
-      random_get_within_range(-10., 10.)},
-    cast(u8) (random_get() % NUM_PARTICLE_TYPES),
-  );
-
-  world_binding_layout := create_world_binding_layout (*particles);
+  world_binding_layout := create_world_binding_layout (particles.count);
   tile_binding_layout  := create_tile_binding_layout(state.world_size);
 
   camera: Camera;
@@ -504,7 +537,7 @@ main :: () {
     defer array_free(instances.pos);
     defer array_free(instances.type);
 
-    world_render_pass(*world_binding_layout, *state, instances, tile_binding_layout.framebuffer);
+    world_render_pass(*world_binding_layout, *state, camera, instances, tile_binding_layout.framebuffer);
     tile_render_pass (*tile_binding_layout,  *state, camera);
 
     SDL_GL_SwapWindow(window);
@@ -512,6 +545,7 @@ main :: () {
     reset_temporary_storage();
   }
 
+  print("A = .%\n", A);
   SDL_DestroyWindow(window);
   SDL_Quit();
 }
@@ -528,6 +562,4 @@ transmute :: inline ($toT: Type, x: $T) -> toT {
 #import "SDL";
 #import "GL";
 #import "Math";
-#import "Random";
-#import "Random";
 #import "Random";
