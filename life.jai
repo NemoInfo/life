@@ -1,4 +1,3 @@
-// u_resolution still being here feels wierd
 WORLD_VS :: #run tprint(#string GLSL
 #version 330 core
 
@@ -9,11 +8,8 @@ layout (location = 2) in int  particle_type;
 out vec2 out_vertex_pos;
 out vec4 out_vertex_col; 
 
-uniform vec2  u_resolution;
+uniform vec2  u_world_size;
 uniform vec4  u_color_types[%2];
-// uniform vec2  u_camera_pos;
-// uniform float u_camera_zoom;
-
 const float PARTICLE_RADIUS = %1;
 
 void main() {
@@ -21,10 +17,9 @@ void main() {
   out_vertex_col = u_color_types[particle_type];
 
   vec2 world_pos  = particle_pos + vertex_pos * PARTICLE_RADIUS;
-  // vec2 cam_pos    = (world_pos - u_camera_pos) * u_camera_zoom;
-  vec2 screen_pos = world_pos + u_resolution * 0.5;
+  vec2 fbo_pos = world_pos + u_world_size * 0.5;
 
-  vec2 ndc = (screen_pos / u_resolution ) * 2.0 - 1.0;
+  vec2 ndc = (fbo_pos / u_world_size ) * 2.0 - 1.0;
   ndc.y    = -ndc.y;
   gl_Position = vec4(ndc, 0.0, 1.0);
 }
@@ -49,6 +44,63 @@ void main() {
 }
 GLSL
 
+TILE_VS :: #string GLSL
+#version 330 core
+layout (location = 0) in vec2 aPos;
+out vec2 vTexCoord;
+void main() {
+  vTexCoord = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+GLSL
+
+TILE_FS :: #string GLSL
+#version 330 core
+
+in vec2 vTexCoord; // full‑screen quad UV [0,1]
+out vec4 fragColor;
+
+uniform sampler2D u_worldTexture;
+uniform vec2      u_worldSize;
+uniform vec2      u_cameraPos;
+uniform float     u_cameraZoom;
+uniform vec2      u_windowSize;
+uniform float     u_particleRadius;   // world units
+
+vec3 grayscale(vec3 c) {
+  float luma = dot(c, vec3(0.299, 0.587, 0.114));
+  return vec3(luma);
+}
+
+void main() {
+  // 1. Compute world position from fragment coordinate
+  vec2 fragCoord = gl_FragCoord.xy;
+  vec2 screenCenter = u_windowSize * 0.5;
+  vec2 offset = (fragCoord - screenCenter) / u_cameraZoom;
+  vec2 worldPos = u_cameraPos + offset;
+
+  // 2. Convert to texture UV space (0..1 covers exactly one world tile)
+  vec2 worldUV = worldPos / u_worldSize + 0.5;
+  vec2 tileUV  = fract(worldUV);
+  ivec2 tileIndex = ivec2(floor(worldUV));
+
+  // Camera tile index (the "original" coloured tile)
+  vec2 camUV = u_cameraPos / u_worldSize + 0.5;
+  ivec2 camTile = ivec2(floor(camUV));
+
+  // 3. Distance to tile edges in UV space
+  vec2 distToLeft   = tileUV;
+  vec2 distToRight  = 1.0 - tileUV;
+
+  // 4. Sample base tile
+  vec4 baseColor = texture(u_worldTexture, tileUV);
+  bool isOriginal = (tileIndex == camTile);
+  vec3 rgb = isOriginal ? baseColor.rgb : grayscale(baseColor.rgb);
+    
+  fragColor = vec4(rgb, baseColor.a);
+}
+GLSL
+
 f32 :: float32;
 f64 :: float64;
 
@@ -56,12 +108,16 @@ PARTICLE_RADIUS :: 5.;
 MAX_PARTICLE_TYPES :: 32;
 NUM_PARTICLE_TYPES :: 5;
 PARTICLE_COLORS : [MAX_PARTICLE_TYPES] Vector4;
-NUM_PARTICLES :: 10_000;
+NUM_PARTICLES :: 500;
 
-Simulation_State :: struct {
-  world_size  : Vector2 = .{1800., 1000.};
-  window_size : Vector2 = .{1920., 1080.};
-  dt          : f32;
+Simulation_State:  : struct {
+  world_size:      Vector2 = .{1800., 1000.};
+  window_size:     Vector2 = .{1920., 1080.};
+  dt:              f32;
+  time_last_frame: Apollo_Time;
+  exit:            bool = false;
+  fps_counter:     int = 0;
+  fps_timer:       f32 = 0;
 }
 
 Camera_Uniform :: struct {
@@ -89,19 +145,25 @@ Particles :: struct {
 }
 
 World_Binding_Layout :: struct {
-  vao          : GLuint;
-  quad_vbo     : GLuint;
-  pos_vbo      : GLuint;
-  type_vbo     : GLuint;
-  shader       : GLuint;
+  vao:      GLuint;
+  quad_vbo: GLuint;
+  pos_vbo:  GLuint;
+  type_vbo: GLuint;
+  shader:   GLuint;
 }
 
 Tile_Binding_Layout :: struct {
-  framebuffer: GLuint;
+  framebuffer:   GLuint;
   world_texture: GLuint;
-  quad_vao: GLuint;
-  quad_vbo: GLuint;
-  shader: GLuint;
+  quad_vao:      GLuint;
+  quad_vbo:      GLuint;
+  shader:        GLuint;
+}
+
+add_instance :: (instances: *Particle_Instances, pos: Vector2, type: u8) {
+  array_add(*instances.pos,  pos);
+  array_add(*instances.type, type);
+  instances.count += 1;
 }
 
 add_particle :: (particles: *Particles, pos: Vector2, vel: Vector2, acc: Vector2, type: u8) {
@@ -110,6 +172,24 @@ add_particle :: (particles: *Particles, pos: Vector2, vel: Vector2, acc: Vector2
   array_add(*particles.acc,  acc);
   array_add(*particles.type, type);
   particles.count += 1;
+}
+
+wrap_particle_instances :: (instances: Particle_Instances, world_size: Vector2) -> Particle_Instances {
+  total: Particle_Instances;
+
+  for 0..instances.count/2-1 {
+    add_instance(*total, instances.pos[it], instances.type[it]);
+    if instances.pos[it].x > world_size.x * 0.5 - PARTICLE_RADIUS
+      add_instance(*total, instances.pos[it] - .{world_size.x,0}, instances.type[it]);
+    if instances.pos[it].x < -world_size.x * 0.5 + PARTICLE_RADIUS
+      add_instance(*total, instances.pos[it] + .{world_size.x,0}, instances.type[it]);
+    if instances.pos[it].y > world_size.y * 0.5 - PARTICLE_RADIUS
+      add_instance(*total, instances.pos[it] - .{0,world_size.y}, instances.type[it]);
+    if instances.pos[it].y < -world_size.y * 0.5 + PARTICLE_RADIUS
+      add_instance(*total, instances.pos[it] + .{0,world_size.y}, instances.type[it]);
+  }
+
+  return total;
 }
 
 update_particles :: (using particles: *Particles, using state: Simulation_State) {
@@ -178,15 +258,34 @@ create_tile_binding_layout :: (world_size: Vector2) -> Tile_Binding_Layout {
   using gl;
   using layout: Tile_Binding_Layout;
 
+  // Framebuffer texture (same as before)
   glGenTextures(1, *world_texture); 
   glBindTexture(GL_TEXTURE_2D, world_texture);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 
                cast(u32) world_size.x, cast(u32) world_size.y, 
                0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
   glGenFramebuffers(1, *framebuffer);
   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, world_texture, 0);
+
+  // Full‑screen quad VAO
+  glGenVertexArrays(1, *quad_vao);
+  glBindVertexArray(quad_vao);
+  glGenBuffers(1, *quad_vbo);
+  glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
+  quad_verts :: f32.[-1,-1, 1,-1, -1,1, 1,1];
+  glBufferData(GL_ARRAY_BUFFER, size_of(type_of(quad_verts)), quad_verts.data, GL_STATIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, size_of(f32)*2, null);
+  glBindVertexArray(0);
+
+  // Compile tile shaders
+  layout.shader = create_shader_program(TILE_VS, TILE_FS);
 
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   return layout;
@@ -197,9 +296,31 @@ tile_render_pass :: (
   using state:  *Simulation_State,
   camera:       Camera,
 ) {
-  glViewport(0, 0, xx window_size.x, xx window_size.y);
+  using gl;
+  // Render to default framebuffer (the screen)
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, xx state.window_size.x, xx state.window_size.y);
   glClearColor(0.0, 0.0, 0.0, 1.0);
   glClear(GL_COLOR_BUFFER_BIT);
+
+  glUseProgram(shader);
+
+  // Bind world texture to unit 0
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, world_texture);
+  glUniform1i(glGetUniformLocation(shader, "u_worldTexture"), 0);
+
+  glUniform2f(glGetUniformLocation(shader, "u_worldSize"),  state.world_size.x, state.world_size.y);
+  glUniform2f(glGetUniformLocation(shader, "u_cameraPos"),  camera.pos.x, camera.pos.y);
+  glUniform1f(glGetUniformLocation(shader, "u_cameraZoom"), camera.zoom);
+  glUniform2f(glGetUniformLocation(shader, "u_windowSize"), state.window_size.x, state.window_size.y);
+  glUniform1f(glGetUniformLocation(shader, "u_particleRadius"), PARTICLE_RADIUS);
+
+  glBindVertexArray(quad_vao);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  glBindVertexArray(0);
+
+  glUseProgram(0);
 }
 
 create_world_binding_layout :: (particles: *Particles) -> World_Binding_Layout {
@@ -257,10 +378,8 @@ world_render_pass :: (
   glBufferSubData(GL_ARRAY_BUFFER,  0, xx (size_of(u8) * instances.count), instances.type.data);
 
   glUseProgram(shader);
-  glUniform2f (glGetUniformLocation(shader, "u_resolution"),  window_size.x, window_size.y);
+  glUniform2f (glGetUniformLocation(shader, "u_world_size"),  world_size.x, world_size.y);
   glUniform4fv(glGetUniformLocation(shader, "u_color_types"), MAX_PARTICLE_TYPES, *PARTICLE_COLORS[0].x);
-  // glUniform2f (glGetUniformLocation(shader, "u_camera_pos"),  camera.x, camera.y);
-  // glUniform1f (glGetUniformLocation(shader, "u_camera_zoom"), camera.zoom);
 
   glBindVertexArray(vao);
   glEnable(GL_BLEND); 
@@ -278,7 +397,7 @@ main :: () {
 
   SDL_Init(SDL_INIT_VIDEO);
   state: Simulation_State;
-  window := SDL_CreateWindow("An SDL2 window", 0, 0, xx state.window_size.x, xx state.window_size.y, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE);
+  window := SDL_CreateWindow("An SDL2 window", -1920, 0, xx state.window_size.x, xx state.window_size.y, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE);
 
   if window == null {
     print("Could not create window: %\n", to_string(SDL_GetError()));
@@ -313,7 +432,7 @@ main :: () {
       1.,
     };
 
-  for 0..NUM_PARTICLES add_particle(*particles, 
+  for 0..NUM_PARTICLES-1 add_particle(*particles, 
     .{random_get_within_range(-state.world_size.x/2, state.world_size.x/2), 
       random_get_within_range(-state.world_size.y/2, state.world_size.y/2)},
     .{random_get_within_range(-100., 100.), 
@@ -327,47 +446,42 @@ main :: () {
   tile_binding_layout  := create_tile_binding_layout(state.world_size);
 
   camera: Camera;
-  is_panning: bool;
-  pan_start_mouse: Vector2;
-  pan_start_camera: Vector2;
-  time_last_frame := current_time_monotonic();
-  exit := false;
-  fps_counter : int = 0;
-  fps_timer   : f32 = 0;
-  while !exit {
+  state.time_last_frame = current_time_monotonic();
+  while !state.exit {
     time_this_frame := current_time_monotonic();
-    dt := time_this_frame - time_last_frame;
-    state.dt = xx to_float64_seconds(dt);
-    time_last_frame = time_this_frame;
-    fps_timer   += state.dt;
-    fps_counter += 1;
-    if fps_timer > 1. {
-      title := tprint("Particle Sim | FPS: %\0", fps_counter);
+    state.dt = xx to_float64_seconds(time_this_frame - state.time_last_frame);
+    state.time_last_frame = time_this_frame;
+    state.fps_timer   += state.dt;
+    state.fps_counter += 1;
+    if state.fps_timer > 1. {
+      title := tprint("Particle Sim | FPS: %\0", state.fps_counter);
       SDL_SetWindowTitle(window, title.data);
-      fps_timer, fps_counter = 0, 0;
+      state.fps_timer, state.fps_counter = 0, 0;
     }
 
     event : SDL_Event;
     while SDL_PollEvent(*event) {
       if event.type == {
-        case SDL_QUIT; exit = true;
+        case SDL_QUIT; state.exit = true;
         case SDL_KEYUP;
-          if event.key.keysym.sym == SDLK_ESCAPE exit = true;
+          if event.key.keysym.sym == SDLK_ESCAPE state.exit = true;
         case SDL_WINDOWEVENT;
           if event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED
             state.window_size = .{xx event.window.data1, xx event.window.data2};
         case SDL_MOUSEBUTTONDOWN;
           if event.button.button == SDL_BUTTON_LEFT {
-            is_panning = true;
-            pan_start_mouse  = .{xx event.button.x, xx event.button.y};
-            pan_start_camera = camera.pos;
+            camera.is_panning = true;
+            camera.pan_start_mouse  = .{xx event.button.x, xx event.button.y};
+            camera.pan_start_camera = camera.pos;
           }
         case SDL_MOUSEBUTTONUP;
-          if event.button.button == SDL_BUTTON_LEFT is_panning = false;
+          if event.button.button == SDL_BUTTON_LEFT camera.is_panning = false;
         case SDL_MOUSEMOTION;
-          if is_panning {
-            dm := Vector2.{xx event.motion.x, xx event.motion.y} - pan_start_mouse;
-            camera.pos = pan_start_camera - .{dm.x, dm.y} / camera.zoom;
+          if camera.is_panning {
+            dm := Vector2.{xx event.motion.x, xx event.motion.y} - camera.pan_start_mouse;
+            camera.pos = camera.pan_start_camera - .{dm.x, -dm.y} / camera.zoom;
+            camera.pos.x = clamp(camera.pos.x, -state.world_size.x / 4, state.world_size.x / 4);
+            camera.pos.y = clamp(camera.pos.y, -state.world_size.y / 4, state.world_size.y / 4);
           }
         case SDL_MOUSEWHEEL; 
           mx, my: s32;
@@ -377,18 +491,25 @@ main :: () {
           world_before := camera.pos + mouse_screen / camera.zoom;
           zoom_factor  := ifx event.wheel.y > 0 then 1.1 else 1./1.1;
           camera.zoom  *= zoom_factor;
-          camera.zoom   = clamp(camera.zoom, 0.05, 20.);
+          camera.zoom   = clamp(camera.zoom, 0.5, 20.);
           world_after  := camera.pos + mouse_screen / camera.zoom;
           camera.pos   += world_before - world_after;
+          camera.pos.x = clamp(camera.pos.x, -state.world_size.x / 4, state.world_size.x / 4);
+          camera.pos.y = clamp(camera.pos.y, -state.world_size.y / 4, state.world_size.y / 4);
       }
     }
 
     update_particles (*particles, state);
+    instances := wrap_particle_instances(particles.instances, state.world_size);
+    defer array_free(instances.pos);
+    defer array_free(instances.type);
 
-    world_render_pass(*world_binding_layout, *state, particles.instances, tile_binding_layout.framebuffer);
+    world_render_pass(*world_binding_layout, *state, instances, tile_binding_layout.framebuffer);
     tile_render_pass (*tile_binding_layout,  *state, camera);
 
     SDL_GL_SwapWindow(window);
+    
+    reset_temporary_storage();
   }
 
   SDL_DestroyWindow(window);
