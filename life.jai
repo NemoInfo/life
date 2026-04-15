@@ -174,6 +174,12 @@ add_instance :: (instances: *Particle_Instances, pos: Vector2, type: u8) {
   instances.count += 1;
 }
 
+remove_n_instances_from_end :: (instances: *Particle_Instances, n: s64) {
+  instances.*.count      -= n;
+  instances.*.pos.count  -= n;
+  instances.*.type.count -= n;
+}
+
 add_particle :: (particles: *Particles, pos: Vector2, vel: Vector2, acc: Vector2, type: u8) {
   array_add(*particles.pos,  pos);
   array_add(*particles.vel,  vel);
@@ -182,22 +188,19 @@ add_particle :: (particles: *Particles, pos: Vector2, vel: Vector2, acc: Vector2
   particles.count += 1;
 }
 
-wrap_particle_instances :: (instances: Particle_Instances, world_size: Vector2) -> Particle_Instances {
-  total: Particle_Instances;
-
-  for 0..instances.count-1 {
-    add_instance(*total, instances.pos[it], instances.type[it]);
+wrap_particle_instances :: (instances: *Particle_Instances, world_size: Vector2) -> s64 {
+  init_count := instances.count;
+  for 0..init_count-1 {
     if instances.pos[it].x > world_size.x * 0.5 - PARTICLE_RADIUS
-      add_instance(*total, instances.pos[it] - .{world_size.x,0}, instances.type[it]);
+      add_instance(instances, instances.pos[it] - .{world_size.x,0}, instances.type[it]);
     if instances.pos[it].x < -world_size.x * 0.5 + PARTICLE_RADIUS
-      add_instance(*total, instances.pos[it] + .{world_size.x,0}, instances.type[it]);
+      add_instance(instances, instances.pos[it] + .{world_size.x,0}, instances.type[it]);
     if instances.pos[it].y > world_size.y * 0.5 - PARTICLE_RADIUS
-      add_instance(*total, instances.pos[it] - .{0,world_size.y}, instances.type[it]);
+      add_instance(instances, instances.pos[it] - .{0,world_size.y}, instances.type[it]);
     if instances.pos[it].y < -world_size.y * 0.5 + PARTICLE_RADIUS
-      add_instance(*total, instances.pos[it] + .{0,world_size.y}, instances.type[it]);
+      add_instance(instances, instances.pos[it] + .{0,world_size.y}, instances.type[it]);
   }
-
-  return total;
+  return instances.count - init_count;
 }
 
 update_particles :: (using particles: *Particles, using state: Simulation_State) {
@@ -394,12 +397,11 @@ world_render_pass :: (
   glClear(GL_COLOR_BUFFER_BIT);
 
   glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
-  // @TODO: with a dynamic number of particles u have to call glBufferData again
-  // glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * instances.count, null, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * instances.count, null, GL_DYNAMIC_DRAW);
   glBufferSubData(GL_ARRAY_BUFFER,  0, xx (size_of(Vector2) * instances.count), instances.pos.data);
 
   glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
-  // glBufferData(GL_ARRAY_BUFFER, size_of(u8) * instances.count, null, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, size_of(u8) * instances.count, null, GL_DYNAMIC_DRAW);
   glBufferSubData(GL_ARRAY_BUFFER,  0, xx (size_of(u8) * instances.count), instances.type.data);
 
   glUseProgram(shader);
@@ -539,11 +541,11 @@ main :: () {
     }
 
     update_particles (*particles, state);
-    instances := wrap_particle_instances(particles.instances, state.world_size);
-    defer array_free(instances.pos);
-    defer array_free(instances.type);
 
-    world_render_pass(*world_binding_layout, *state, camera, instances, tile_binding_layout.framebuffer);
+    wrap_count := wrap_particle_instances(*particles.instances, state.world_size);
+    defer remove_n_instances_from_end(*particles.instances, wrap_count);
+
+    world_render_pass(*world_binding_layout, *state, camera, particles.instances, tile_binding_layout.framebuffer);
     tile_render_pass (*tile_binding_layout,  *state, camera);
 
     SDL_GL_SwapWindow(window);
