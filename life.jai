@@ -103,22 +103,85 @@ void main() {
 }
 GLSL
 
+COMPUTE_SHADER :: #run tprint(#string GLSL
+#version 430 core
+
+layout(local_size_x = %1) in;
+
+layout(std430, binding = 0) buffer PosBuffer {
+    vec2 pos[];
+};
+
+layout(std430, binding = 1) buffer VelBuffer {
+    vec2 vel[];
+};
+
+layout(std430, binding = 2) buffer TypeBuffer {
+    int type[];
+};
+
+layout(std430, binding = 3) buffer AttractionBuffer {
+    float A[];
+};
+
+uniform vec2  u_worldSize;
+uniform float u_dt;
+uniform float u_rMax;
+uniform float u_tHalf;
+uniform int   u_numParticles;
+uniform int   u_numParticleTypes;
+
+const float BETA = 0.3;
+
+float force(float r, float a) {
+    if (r < BETA) return r / BETA - 1.0;
+    if (r < 1.0)  return a * (1.0 - abs(2.0 * r - 1.0 - BETA) / (1.0 - BETA));
+    return 0.0;
+}
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= u_numParticles) return;
+
+  vec2 total_a = vec2(0.);
+  for (uint j = 0; j < u_numParticles; ++j) {
+    if (i == j) continue;
+    vec2 r = pos[j] - pos[i];
+    r.x -= u_worldSize.x * float(r.x >  u_worldSize.x * 0.5);
+    r.x += u_worldSize.x * float(r.x < -u_worldSize.x * 0.5);
+    r.y -= u_worldSize.y * float(r.y >  u_worldSize.y * 0.5);
+    r.y += u_worldSize.y * float(r.y < -u_worldSize.y * 0.5);
+    float r_len = length(r);
+    if (r_len > u_rMax) continue;
+    float a = A[type[j] * u_numParticleTypes + type[j]];
+    total_a += (r / r_len) * force(r_len / u_rMax, a);
+  }
+  vel[i]    = vel[i] * pow(0.5, u_dt / u_tHalf) + total_a * u_dt;
+  pos[i]   += vel[i] * u_dt;
+  pos[i].x -= u_worldSize.x * float(pos[i].x >  u_worldSize.x * 0.5);
+  pos[i].x += u_worldSize.x * float(pos[i].x < -u_worldSize.x * 0.5);
+  pos[i].y -= u_worldSize.y * float(pos[i].y >  u_worldSize.y * 0.5);
+  pos[i].y += u_worldSize.y * float(pos[i].y < -u_worldSize.y * 0.5);
+}
+GLSL, PARTICLES_PER_WORK_GROUPS);
+
 f32 :: float32;
 f64 :: float64;
 
-PARTICLE_RADIUS       :: 2.;
-NUM_PARTICLE_TYPES    :: 5;
-MAX_PARTICLE_TYPES    :: 32;
-NUM_PARTICLES         :: 1200;
-PIXELS_PER_WORLD_UNIT :: 10;
-R_MAX                 :: 100.;
-T_HALF                :: 1.5;
+PARTICLE_RADIUS           :: 2.;
+NUM_PARTICLE_TYPES        :: 5;
+MAX_PARTICLE_TYPES        :: 32;
+NUM_PARTICLES             :: 20_000;
+PIXELS_PER_WORLD_UNIT     :: 10;
+R_MAX                     :: 100.;
+T_HALF                    :: 1.2;
+PARTICLES_PER_WORK_GROUPS :: 256;
 
-A : [NUM_PARTICLE_TYPES][NUM_PARTICLE_TYPES] f32;
-PARTICLE_COLORS    : [MAX_PARTICLE_TYPES] Vector4;
+A:               [..] f32;
+PARTICLE_COLORS: [MAX_PARTICLE_TYPES] Vector4;
 
 Simulation_State:  : struct {
-  world_size:      Vector2 = .{1920., 1080.};
+  world_size:      Vector2 = .{1920*2., 1080*2.};
   resolution:      Vector2 = #run .{1920., 1080.} * PIXELS_PER_WORLD_UNIT;
   window_size:     Vector2 = .{1920., 1080.};
   dt:              f32;
@@ -148,11 +211,18 @@ Particle_Instances :: struct {
 
 Particles :: struct {
   #as using instances: Particle_Instances;
-  acc:  [..] Vector2;
   vel:  [..] Vector2;
 }
 
-World_Binding_Layout :: struct {
+Compute_Binding :: struct {
+  pos_ssbo: GLuint;
+  vel_ssbo: GLuint;
+  type_ssbo: GLuint;
+  a_ssbo:   GLuint;
+  shader:   GLuint;
+}
+
+World_Binding :: struct {
   vao:      GLuint;
   quad_vbo: GLuint;
   pos_vbo:  GLuint;
@@ -160,7 +230,7 @@ World_Binding_Layout :: struct {
   shader:   GLuint;
 }
 
-Tile_Binding_Layout :: struct {
+Tile_Binding :: struct {
   framebuffer:   GLuint;
   world_texture: GLuint;
   quad_vao:      GLuint;
@@ -183,7 +253,6 @@ remove_n_instances_from_end :: (instances: *Particle_Instances, n: s64) {
 add_particle :: (particles: *Particles, pos: Vector2, vel: Vector2, acc: Vector2, type: u8) {
   array_add(*particles.pos,  pos);
   array_add(*particles.vel,  vel);
-  array_add(*particles.acc,  acc);
   array_add(*particles.type, type);
   particles.count += 1;
 }
@@ -203,28 +272,6 @@ wrap_particle_instances :: (instances: *Particle_Instances, world_size: Vector2)
   return instances.count - init_count;
 }
 
-update_particles :: (using particles: *Particles, using state: Simulation_State) {
-  for i: 0..count-1 {
-    acc[i] = Vector2.{};
-    for j: 0..count-1 {
-      if i == j continue;
-      r       := pos[j] - pos[i];
-      r.x -= world_size.x * xx (r.x >  world_size.x * 0.5);
-      r.x += world_size.x * xx (r.x < -world_size.x * 0.5);
-      r.y -= world_size.y * xx (r.y >  world_size.y * 0.5);
-      r.y += world_size.y * xx (r.y < -world_size.y * 0.5);
-      r_len   := length(r);
-      acc[i] += r / r_len * force(r_len / R_MAX, A[type[i]][type[j]]);
-    }
-    vel[i]    = vel[i] * pow(1./2., dt / T_HALF) + acc[i] * dt;
-    pos[i]   += vel[i] * dt;
-    pos[i].x -= world_size.x * xx (pos[i].x >  world_size.x  * 0.5);
-    pos[i].x += world_size.x * xx (pos[i].x < -world_size.x  * 0.5);
-    pos[i].y -= world_size.y * xx (pos[i].y >  world_size.y * 0.5);
-    pos[i].y += world_size.y * xx (pos[i].y < -world_size.y * 0.5);
-  }
-}
-
 // @TODO
 //   ✔  remove radius and maybe color from instance, maybe bake them into the shader?
 //   ✔  implement 2D Camera, switch to world coordonates
@@ -232,11 +279,13 @@ update_particles :: (using particles: *Particles, using state: Simulation_State)
 //   - gui & tools
 //
 // @PERFORMANCE:
+//   ✔  push update to compute shader
 //   - async simulation thread 
-//   - multi-processing for the particle-particle forces , maybe even push to compute shader? 
 //   - hierarichal structure 
 //
 // @QUALITY:
+//   - fix render to texture pipeline, 
+//     think about what resolution to use
 //   - break the monolith, refactor game loop
 //   - async logging
 
@@ -258,30 +307,132 @@ compile_shader :: (source: string, shader_type: GLenum) -> GLuint {
     return id;
 }
 
-create_shader_program :: (vert_src: string, frag_src: string) -> GLuint {
+create_compute_shader :: (source: string) -> GLuint {
     using gl;
-    vert := compile_shader(vert_src, GL_VERTEX_SHADER);
-    frag := compile_shader(frag_src, GL_FRAGMENT_SHADER);
-    prog := glCreateProgram();
-    glAttachShader(prog, vert);
-    glAttachShader(prog, frag);
-    glLinkProgram(prog);
+    shader := glCreateShader(GL_COMPUTE_SHADER);
+    src := source.data;
+    len : GLint = xx source.count;
+    glShaderSource(shader, 1, *src, *len);
+    glCompileShader(shader);
 
     ok : GLint;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, *ok);
+    if !ok {
+        buf : [512] u8; glGetShaderInfoLog(shader, 512, null, buf.data);
+        print("Compute shader compile error: %\n", to_string(buf.data));
+        exit(1);
+    }
+
+    prog := glCreateProgram();
+    glAttachShader(prog, shader);
+    glLinkProgram(prog);
     glGetProgramiv(prog, GL_LINK_STATUS, *ok);
     if !ok {
-      buf : [512] u8; glGetProgramInfoLog(prog, 512, null, buf.data);
-      print("Shader link error: %\n", to_string(buf.data));
-      exit(1);
+        buf : [512] u8; glGetProgramInfoLog(prog, 512, null, buf.data);
+        print("Compute program link error: %\n", to_string(buf.data));
+        exit(1);
     }
-    glDeleteShader(vert);
-    glDeleteShader(frag);
+    glDeleteShader(shader);
+
     return prog;
 }
 
-create_tile_binding_layout :: (resolution: Vector2) -> Tile_Binding_Layout {
+create_shader_program :: (vert_src: string, frag_src: string) -> GLuint {
   using gl;
-  using layout: Tile_Binding_Layout;
+  vert := compile_shader(vert_src, GL_VERTEX_SHADER);
+  frag := compile_shader(frag_src, GL_FRAGMENT_SHADER);
+  prog := glCreateProgram();
+  glAttachShader(prog, vert);
+  glAttachShader(prog, frag);
+  glLinkProgram(prog);
+
+  ok : GLint;
+  glGetProgramiv(prog, GL_LINK_STATUS, *ok);
+  if !ok {
+    buf : [512] u8; glGetProgramInfoLog(prog, 512, null, buf.data);
+    print("Shader link error: %\n", to_string(buf.data));
+    exit(1);
+  }
+  glDeleteShader(vert);
+  glDeleteShader(frag);
+  return prog;
+}
+
+create_compute_binding :: (particles_count: s64, attraction_matrix: [] f32) -> Compute_Binding {
+  using gl;
+  b: Compute_Binding;
+  b.shader = create_compute_shader(COMPUTE_SHADER);
+
+  // location = 0 pos Vector2
+  glGenBuffers     (1, *b.pos_ssbo);
+  glBindBuffer     (GL_SHADER_STORAGE_BUFFER, b.pos_ssbo);
+  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(Vector2) * particles_count, null, GL_DYNAMIC_COPY);
+  glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 0, b.pos_ssbo);
+
+  // location = 1 pos Vector2
+  glGenBuffers     (1, *b.vel_ssbo);
+  glBindBuffer     (GL_SHADER_STORAGE_BUFFER, b.vel_ssbo);
+  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(Vector2) * particles_count, null, GL_DYNAMIC_COPY);
+  glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 1, b.vel_ssbo);
+
+  // location = 2 pos Vector2
+  glGenBuffers     (1, *b.type_ssbo);
+  glBindBuffer     (GL_SHADER_STORAGE_BUFFER, b.type_ssbo);
+  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(u8) * particles_count, null, GL_DYNAMIC_COPY);
+  glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 2, b.type_ssbo);
+
+  // location = 3 pos Vector2
+  glGenBuffers     (1, *b.a_ssbo);
+  glBindBuffer     (GL_SHADER_STORAGE_BUFFER, b.a_ssbo);
+  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(f32) * attraction_matrix.count, attraction_matrix.data, GL_STATIC_DRAW);
+  glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 3, b.a_ssbo);
+
+  glBindBuffer    (GL_SHADER_STORAGE_BUFFER, 0);
+  return b;
+}
+
+
+compute_pass :: (using b: Compute_Binding, particles: *Particles, state: Simulation_State) {
+  using gl;
+  glUseProgram(shader);
+
+  glBindBuffer    (GL_SHADER_STORAGE_BUFFER, pos_ssbo);
+  glBufferSubData (GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector2) * particles.count, particles.pos.data);
+  glBindBuffer    (GL_SHADER_STORAGE_BUFFER, vel_ssbo);
+  glBufferSubData (GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector2) * particles.count, particles.vel.data);
+  glBindBuffer    (GL_SHADER_STORAGE_BUFFER, type_ssbo);
+  glBufferSubData (GL_SHADER_STORAGE_BUFFER, 0, size_of(u8) * particles.count, particles.type.data);
+  // glBindBuffer    (GL_SHADER_STORAGE_BUFFER, a_ssbo);
+  // glBufferSubData (GL_SHADER_STORAGE_BUFFER, size_of(f32) * attraction_matrix.count, attraction_matrix.data);
+  glBindBuffer    (GL_SHADER_STORAGE_BUFFER, 0);
+
+  // Set uniforms
+  glUniform2f(glGetUniformLocation(shader, "u_worldSize"), state.world_size.x, state.world_size.y);
+  glUniform1f(glGetUniformLocation(shader, "u_dt"), state.dt);
+  glUniform1f(glGetUniformLocation(shader, "u_rMax"), R_MAX);
+  glUniform1f(glGetUniformLocation(shader, "u_tHalf"), T_HALF);
+  glUniform1i(glGetUniformLocation(shader, "u_numParticles"), NUM_PARTICLES);
+  glUniform1i(glGetUniformLocation(shader, "u_numParticleTypes"), NUM_PARTICLE_TYPES);
+
+  work_groups := (NUM_PARTICLES + PARTICLES_PER_WORK_GROUPS - 1) / PARTICLES_PER_WORK_GROUPS;
+  glDispatchCompute(xx work_groups, 1, 1);
+
+  // Ensure SSBO writes are visible to subsequent draw calls
+  glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT);
+  glUseProgram(0);
+
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, pos_ssbo);
+  glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector2) * particles.count, particles.pos.data);
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, vel_ssbo);
+  glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector2) * particles.count, particles.vel.data);
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, type_ssbo);
+  glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector2) * particles.count, particles.type.data);
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+create_tile_binding :: (resolution: Vector2) -> Tile_Binding {
+  using gl;
+  using layout: Tile_Binding;
 
   // Framebuffer texture (same as before)
   glGenTextures(1, *world_texture); 
@@ -317,7 +468,7 @@ create_tile_binding_layout :: (resolution: Vector2) -> Tile_Binding_Layout {
 }
 
 tile_render_pass :: (
-  using layout: *Tile_Binding_Layout,
+  using layout: *Tile_Binding,
   using state:  *Simulation_State,
   camera:       Camera,
 ) {
@@ -347,9 +498,9 @@ tile_render_pass :: (
   glUseProgram(0);
 }
 
-create_world_binding_layout :: (particles_count: s64) -> World_Binding_Layout {
+create_world_binding :: (particles_count: s64) -> World_Binding {
     using gl;
-    using layout : World_Binding_Layout;
+    using layout : World_Binding;
     glGenVertexArrays(1, *vao);
     glBindVertexArray(vao);
 
@@ -364,7 +515,7 @@ create_world_binding_layout :: (particles_count: s64) -> World_Binding_Layout {
     // pos stream
     glGenBuffers(1, *pos_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
-    glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * particles_count * 5, null, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * particles_count, null, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, size_of(Vector2), null);
     glVertexAttribDivisor(1, 1);
@@ -372,7 +523,7 @@ create_world_binding_layout :: (particles_count: s64) -> World_Binding_Layout {
     // type stream
     glGenBuffers(1, *type_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
-    glBufferData(GL_ARRAY_BUFFER, size_of(u8) * particles_count * 5, null, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, size_of(u8) * particles_count, null, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(2);
     glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, size_of(u8), null);
     glVertexAttribDivisor(2, 1);
@@ -383,7 +534,7 @@ create_world_binding_layout :: (particles_count: s64) -> World_Binding_Layout {
 }
 
 world_render_pass :: (
-  using layout: *World_Binding_Layout,
+  using layout: *World_Binding,
   using state:  *Simulation_State,
   camera: Camera,
   instances:    Particle_Instances,
@@ -397,12 +548,10 @@ world_render_pass :: (
   glClear(GL_COLOR_BUFFER_BIT);
 
   glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
-  glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * instances.count, null, GL_DYNAMIC_DRAW);
-  glBufferSubData(GL_ARRAY_BUFFER,  0, xx (size_of(Vector2) * instances.count), instances.pos.data);
+  glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * instances.count, instances.pos.data, GL_DYNAMIC_DRAW);
 
   glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
-  glBufferData(GL_ARRAY_BUFFER, size_of(u8) * instances.count, null, GL_DYNAMIC_DRAW);
-  glBufferSubData(GL_ARRAY_BUFFER,  0, xx (size_of(u8) * instances.count), instances.type.data);
+  glBufferData(GL_ARRAY_BUFFER, size_of(u8) * instances.count, instances.type.data, GL_DYNAMIC_DRAW);
 
   glUseProgram(shader);
   glUniform2f (glGetUniformLocation(shader, "u_world_size"),  world_size.x, world_size.y);
@@ -439,8 +588,8 @@ init_simulation :: (particles: *Particles, world_size: Vector2) {
     cast(u8) (random_get() % NUM_PARTICLE_TYPES),
   );
 
-  for *A for *(it.*) it.* = random_get_within_range(-1., 1.) * 2.;
-  // A = .[.[0.744254, -0.822552, -0.418013, -0.305391, 0.373153], .[0.266228, 0.903647, -0.11726, -0.119418, -0.623262], .[-0.062638, 0.277877, 0.92583, -0.635536, 0.524239], .[0.866223, 0.08902, -0.875463, 0.288696, -0.506347], .[0.846281, -0.477031, 0.351822, 0.487101, 0.738286]];
+  array_resize(*A, NUM_PARTICLE_TYPES * NUM_PARTICLE_TYPES);
+  for *A it.* = random_get_within_range(-1., 1.) * 2.;
 }
 
 force :: (r: f32, a: f32, beta: f32 = 0.3) -> f32 {
@@ -458,18 +607,28 @@ main :: () {
   state: Simulation_State;
   window := SDL_CreateWindow("An SDL2 window", 0, 0, xx state.window_size.x, xx state.window_size.y, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN);
 
+
   if window == null {
     print("Could not create window: %\n", to_string(SDL_GetError()));
-    return;
+    exit(1);
   }
 
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, xx SDL_GL_CONTEXT_PROFILE_CORE);
-
   gl_context := SDL_GL_CreateContext(window);
   if !gl_context {
     print( "Could not create OpenGL context: %\n", to_string(SDL_GetError()));
-    return;
+    exit(1);
   }  
+
+  major, minor : GLint;
+  glGetIntegerv(GL_MAJOR_VERSION, *major);
+  glGetIntegerv(GL_MINOR_VERSION, *minor);
+  if major < 4 || (major == 4 && minor < 3) {
+    print("Compute shaders require OpenGL 4.3 or higher.\n");
+    exit(1);
+  }
 
   SDL_GL_SetSwapInterval(0);
 
@@ -483,8 +642,9 @@ main :: () {
   particles: Particles;
   init_simulation(*particles, state.world_size);
 
-  world_binding_layout := create_world_binding_layout (particles.count);
-  tile_binding_layout  := create_tile_binding_layout(state.resolution);
+  world_binding   := create_world_binding (particles.count);
+  tile_binding    := create_tile_binding(state.resolution);
+  compute_binding := create_compute_binding(particles.count, A);
 
   camera: Camera;
   state.time_last_frame = current_time_monotonic();
@@ -522,8 +682,6 @@ main :: () {
             world_now    := screen_to_world(mouse, state, camera);
             world_start  := screen_to_world(camera.pan_start_mouse, state, camera);
             camera.pos    = camera.pan_start_camera + (world_start - world_now);
-            camera.pos.x  = clamp(camera.pos.x, -state.resolution.x/4, state.resolution.x/4);
-            camera.pos.y  = clamp(camera.pos.y, -state.resolution.y/4, state.resolution.y/4);
           }
         case SDL_MOUSEWHEEL;
           mx, my: s32;
@@ -535,21 +693,15 @@ main :: () {
           camera.zoom   = clamp(camera.zoom, 0.5 / PIXELS_PER_WORLD_UNIT, 20. / PIXELS_PER_WORLD_UNIT);
           world_after  := screen_to_world(mouse, state, camera);
           camera.pos   += world_before - world_after;
-          camera.pos.x  = clamp(camera.pos.x, -state.resolution.x/4, state.resolution.x/4);
-          camera.pos.y  = clamp(camera.pos.y, -state.resolution.y/4, state.resolution.y/4);
       }
     }
-
-    update_particles (*particles, state);
-
+    compute_pass(compute_binding, *particles, state);
     wrap_count := wrap_particle_instances(*particles.instances, state.world_size);
     defer remove_n_instances_from_end(*particles.instances, wrap_count);
-
-    world_render_pass(*world_binding_layout, *state, camera, particles.instances, tile_binding_layout.framebuffer);
-    tile_render_pass (*tile_binding_layout,  *state, camera);
+    world_render_pass(*world_binding, *state, camera, particles.instances, tile_binding.framebuffer);
+    tile_render_pass (*tile_binding,  *state, camera);
 
     SDL_GL_SwapWindow(window);
-    
     reset_temporary_storage();
   }
 
