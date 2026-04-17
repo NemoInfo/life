@@ -169,8 +169,6 @@ f32 :: float32;
 f64 :: float64;
 
 PARTICLE_RADIUS           :: 2.;
-NUM_PARTICLE_TYPES        :: 8;
-NUM_PARTICLES             :: 20_000;
 PIXELS_PER_WORLD_UNIT     :: 10;
 R_MAX                     :: 100.;
 T_HALF                    :: 0.04;
@@ -180,11 +178,40 @@ Simulation_State :: struct {
   world_size:        Vector2 = .{1920*3., 1080*3.};
   attraction_matrix: [..] f32;
   particle_colors:   [..] Vector4;
+  #overlay (particle_colors.count) particle_types: s64;
   resolution:        Vector2 = #run .{1920., 1080.} * PIXELS_PER_WORLD_UNIT;
   window_size:       Vector2 = .{1920., 1080.};
   dt:                f32;
   time_last_frame:   Apollo_Time;
   exit:              bool = false;
+  active_tool:       Tool;
+}
+
+ToolType :: enum s32 {
+  None;
+  Repel;
+  Attract;
+  Spawn;
+  Delete;
+}
+
+TOOL_NAMES :: #run -> [] string {
+    info := cast(*Type_Info_Enum) type_info(ToolType);
+    return info.names;
+}
+
+Tool :: struct {
+  type:          ToolType;
+  shape:         ShapeType;
+  radius:        f32;
+  force:         f32;
+  count:         s32;
+  particle_type: s64 = -1;
+}
+
+ShapeType :: enum {
+  Circle;
+  Square;
 }
 
 Camera_Uniform :: struct {
@@ -202,7 +229,7 @@ Camera :: struct {
 Particle_Instances :: struct {
   pos:  [..] Vector2;
   type: [..] u32;
-  count: s64;
+  #overlay (pos.count) count: s64;
 }
 
 Particles :: struct {
@@ -238,20 +265,23 @@ Tile_Binding :: struct {
 add_instance :: (instances: *Particle_Instances, pos: Vector2, type: u32) {
   array_add(*instances.pos,  pos);
   array_add(*instances.type, type);
-  instances.count += 1;
 }
 
 remove_n_instances_from_end :: (instances: *Particle_Instances, n: s64) {
-  instances.*.count      -= n;
   instances.*.pos.count  -= n;
   instances.*.type.count -= n;
 }
 
-add_particle :: (particles: *Particles, pos: Vector2, vel: Vector2, acc: Vector2, type: u32) {
+add_particle :: (particles: *Particles, pos: Vector2, vel: Vector2, type: u32) {
   array_add(*particles.pos,  pos);
   array_add(*particles.vel,  vel);
   array_add(*particles.type, type);
-  particles.count += 1;
+}
+
+free_particles :: (particles: Particles) {
+  array_free(particles.pos);
+  array_free(particles.vel);
+  array_free(particles.type);
 }
 
 wrap_particle_instances :: (instances: *Particle_Instances, world_size: Vector2) -> s64 {
@@ -414,10 +444,10 @@ compute_pass :: (using b: Compute_Binding, particles: *Particles, state: Simulat
   glUniform1f(glGetUniformLocation(shader, "u_dt"), state.dt);
   glUniform1f(glGetUniformLocation(shader, "u_rMax"), R_MAX);
   glUniform1f(glGetUniformLocation(shader, "u_frictionFactor"), pow(0.5, state.dt / T_HALF));
-  glUniform1i(glGetUniformLocation(shader, "u_numParticles"), NUM_PARTICLES);
-  glUniform1i(glGetUniformLocation(shader, "u_numParticleTypes"), NUM_PARTICLE_TYPES);
+  glUniform1i(glGetUniformLocation(shader, "u_numParticles"), xx particles.count);
+  glUniform1i(glGetUniformLocation(shader, "u_numParticleTypes"), xx state.particle_types);
 
-  work_groups := (NUM_PARTICLES + PARTICLES_PER_WORK_GROUPS - 1) / PARTICLES_PER_WORK_GROUPS;
+  work_groups := (particles.count + PARTICLES_PER_WORK_GROUPS - 1) / PARTICLES_PER_WORK_GROUPS;
   glDispatchCompute(xx work_groups, 1, 1);
 
   // Ensure SSBO writes are visible to subsequent draw calls
@@ -499,45 +529,42 @@ tile_render_pass :: (
   glUseProgram(0);
 }
 
-create_world_binding :: (particles_count: s64) -> World_Binding {
-    using gl;
-    using layout :World_Binding;
-    glGenVertexArrays(1, *vao);
-    glBindVertexArray(vao);
+create_world_binding :: (particles_count: s64, state: Simulation_State) -> World_Binding {
+  using gl;
+  using layout :World_Binding;
+  glGenVertexArrays(1, *vao);
+  glBindVertexArray(vao);
 
-    // Quad VBO (static)
-    glGenBuffers(1, *quad_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
-    quad_verts :: f32.[-1,-1, 1,-1, -1,1, 1,1];
-    glBufferData(GL_ARRAY_BUFFER, size_of(type_of(quad_verts)) , quad_verts.data, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, size_of(f32) * 2, null);
+  glGenBuffers(1, *quad_vbo);
+  glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
+  quad_verts :: f32.[-1,-1, 1,-1, -1,1, 1,1];
+  glBufferData(GL_ARRAY_BUFFER, size_of(type_of(quad_verts)) , quad_verts.data, GL_STATIC_DRAW);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, size_of(f32) * 2, null);
 
-    // pos stream
-    glGenBuffers(1, *pos_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
-    glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * particles_count, null, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, size_of(Vector2), null);
-    glVertexAttribDivisor(1, 1);
-    
-    // type stream
-    glGenBuffers(1, *type_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
-    glBufferData(GL_ARRAY_BUFFER, size_of(u32) * particles_count, null, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(2);
-    glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, size_of(u32), null);
-    glVertexAttribDivisor(2, 1);
-    glBindVertexArray(0);
+  glGenBuffers(1, *pos_vbo);
+  glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
+  glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * particles_count, null, GL_DYNAMIC_DRAW);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, size_of(Vector2), null);
+  glVertexAttribDivisor(1, 1);
 
-    glGenBuffers     (1, *color_ssbo);
-    glBindBuffer     (GL_SHADER_STORAGE_BUFFER, color_ssbo);
-    glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(Vector4) * NUM_PARTICLE_TYPES, null, GL_DYNAMIC_DRAW);
-    glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 4, color_ssbo);
-    glBindBuffer    (GL_SHADER_STORAGE_BUFFER, 0);
+  glGenBuffers(1, *type_vbo);
+  glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
+  glBufferData(GL_ARRAY_BUFFER, size_of(u32) * particles_count, null, GL_DYNAMIC_DRAW);
+  glEnableVertexAttribArray(2);
+  glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, size_of(u32), null);
+  glVertexAttribDivisor(2, 1);
+  glBindVertexArray(0);
 
-    shader = create_shader_program(WORLD_VS, WORLD_FS);
-    return layout;
+  glGenBuffers     (1, *color_ssbo);
+  glBindBuffer     (GL_SHADER_STORAGE_BUFFER, color_ssbo);
+  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(Vector4) * state.particle_types, null, GL_DYNAMIC_DRAW);
+  glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 4, color_ssbo);
+
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+  shader = create_shader_program(WORLD_VS, WORLD_FS);
+  return layout;
 }
 
 world_render_pass :: (
@@ -561,7 +588,7 @@ world_render_pass :: (
   glBufferData(GL_ARRAY_BUFFER, size_of(u32) * instances.count, instances.type.data, GL_DYNAMIC_DRAW);
 
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, color_ssbo);
-  glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector4) * particle_colors.count, particle_colors.data);
+  glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector4) * particle_types, particle_colors.data);
 
   glUseProgram(shader);
   glUniform2f (glGetUniformLocation(shader, "u_world_size"),  world_size.x, world_size.y);
@@ -577,30 +604,29 @@ world_render_pass :: (
 }
 
 
-init_simulation :: (particles: *Particles, using state: Simulation_State) {
+init_simulation :: (particles: *Particles, using state: Simulation_State, num_particles: s64 = 20_000, num_particle_types : s64 = 6) {
   seed := transmute(u64, to_seconds(current_time_monotonic()));
-  // seed = 14183857;
   random_seed(seed);
   print("seed = %;\n", seed);
 
-  array_resize(*particle_colors, NUM_PARTICLE_TYPES);
+  array_resize(*particle_colors, num_particle_types);
   for *particle_colors 
-    it.* = .{xyz=hsl_to_rgb01(360. * it_index / (NUM_PARTICLE_TYPES + 1), 1., .7), w=1.};
+    it.* = .{xyz=hsl_to_rgb01(360. * it_index / (num_particle_types + 1), 1., .7), w=1.};
 
-  array_resize(*attraction_matrix, NUM_PARTICLE_TYPES * NUM_PARTICLE_TYPES);
-  for *attraction_matrix it.* = random_get_within_range(-1., 1.);
-  print("attraction_matrix = %\n", attraction_matrix);
+  randomize_attraction_matrix(state);
 
-  for 0..NUM_PARTICLES-1 add_particle(particles, 
+  for 0..num_particles-1 add_particle(particles, 
     .{random_get_within_range(-world_size.x/2, world_size.x/2), 
       random_get_within_range(-world_size.y/2, world_size.y/2)},
     .{random_get_within_range(-10., 10.), 
       random_get_within_range(-10., 10.)},
-    .{0,0},
-    cast(u32) (random_get() % NUM_PARTICLE_TYPES),
+    cast(u32) (random_get() % xx num_particle_types),
   );
+}
 
-
+randomize_attraction_matrix :: (using state: Simulation_State) {
+  array_resize(*attraction_matrix, state.particle_types * state.particle_types);
+  for *attraction_matrix it.* = random_get_within_range(-1., 1.);
 }
 
 force :: (r: f32, a: f32, beta: f32 = 0.3) -> f32 {
@@ -616,7 +642,7 @@ main :: () {
 
   SDL_Init(SDL_INIT_VIDEO);
   state: Simulation_State;
-  window := SDL_CreateWindow("An SDL2 window", 0, 0, xx state.window_size.x, xx state.window_size.y, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN);
+  window := SDL_CreateWindow("Particle Life", 0, 0, xx state.window_size.x, xx state.window_size.y, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN);
 
 
   if window == null {
@@ -656,7 +682,7 @@ main :: () {
   particles: Particles;
   init_simulation(*particles, state);
 
-  world_binding   := create_world_binding (particles.count);
+  world_binding   := create_world_binding(particles.count, state);
   tile_binding    := create_tile_binding(state.resolution);
   compute_binding := create_compute_binding(particles.count, state.attraction_matrix);
   io := ImGui.GetIO();
@@ -665,7 +691,6 @@ main :: () {
   config.OversampleH = 4;
   config.OversampleV = 4;
   font := io.Fonts.AddFontFromFileTTF(io.Fonts, "assets/JetBrainsMonoNerdFont-Regular.ttf", 24.0, *config, null);
-  io.FontDefault = font;
 
   camera: Camera;
   state.time_last_frame = current_time_monotonic();
@@ -721,47 +746,151 @@ main :: () {
     ImGui.SetNextWindowPos(.{10, 10}, ImGui.Cond.FirstUseEver, .{0, 0});
     ImGui.SetNextWindowSize(.{200, 80}, ImGui.Cond.FirstUseEver);
     free_id : s32 = 1;
-    if ImGui.Begin("Performance", null, ImGui.WindowFlags.NoTitleBar | ImGui.WindowFlags.AlwaysAutoResize) {
-      ImGui.TextColored(.{0, 1, 0, 1}, "FPS: %", cast(s64) io.Framerate);
-      ImGui.Text("Particles: %", particles.count);
-
+    if ImGui.Begin("GUI", null, ImGui.WindowFlags.NoTitleBar | ImGui.WindowFlags.AlwaysAutoResize) {
+      ImGui.SeparatorText("Info");
+      ImGui.TextColored(.{0, 1, 0, 1}, "FPS:%", formatInt(cast(s64) io.Framerate, padding = #char " ", minimum_digits=4)); 
+      ImGui.SameLine();
+      window_width := ImGui.GetWindowWidth();
+      text_width := ImGui.CalcTextSize(tprint("particles: %d", particles.count)).x;
+      ImGui.SameLine();
+      ImGui.SetCursorPosX(window_width - text_width - ImGui.GetStyle().WindowPadding.x);
+      ImGui.Text("particles: %", particles.count);
+      ImGui.NewLine();
       if ImGui.TreeNode("Attraction Matrix") {
+        new_particle_colors : [..] Vector4;
+        new_attracrtion_matrix : [..] f32;
+        new_particles: Particles;
+        removed_color := false;
+
         ImGui.PushStyleVar(.CellPadding, ImGui.ImVec2.{4, 4});
-        ImGui.BeginTable("Attraction Matrix", NUM_PARTICLE_TYPES + 1);
+        ImGui.BeginTable("Attraction Matrix", xx (state.particle_types + 2));
         ImGui.TableNextRow();
-        for c: 1..NUM_PARTICLE_TYPES {
+        for c: 2..state.particle_types + 1 {
           ImGui.TableSetColumnIndex(xx c);
           ImGui.PushID(free_id); free_id += 1;
           ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().x);
-          ImGui.ColorEdit3("", *state.particle_colors[c-1].xyz.component, ImGui.ColorEditFlags.NoLabel | ImGui.ColorEditFlags.NoInputs);
+          ImGui.ColorEdit3("", *state.particle_colors[c-2].xyz.component, ImGui.ColorEditFlags.NoLabel | ImGui.ColorEditFlags.NoInputs);
           ImGui.PopID();
         }
-        for r: 0..NUM_PARTICLE_TYPES-1 {
+        for r: 0..state.particle_types - 1 {
           ImGui.TableNextRow();
+
           ImGui.TableSetColumnIndex(0);
+          ImGui.PushID(free_id); free_id += 1;
+
+          ImGui.PushStyleColor(.Text,          .{1., 1., 1., 1.});
+          ImGui.PushStyleColor(.Button,        .{1., 0, 0, .5});
+          ImGui.PushStyleColor(.ButtonHovered, .{1., 0, 0, .8});
+          ImGui.PushStyleColor(.ButtonActive,  .{1., 0, 0, 1.});
+          if ImGui.Button("x") {
+            removed_color = true;
+            for i: 0..state.particle_types - 1 if i != r
+              array_add(*new_particle_colors, state.particle_colors[i]);
+
+            for i: 0..state.particle_types - 1 if i != r
+              for j: 0..state.particle_types - 1 if j != r
+                array_add(*new_attracrtion_matrix, state.attraction_matrix[i*state.particle_types + j]);
+
+            for i: 0..particles.count - 1 if particles.type[i] != r
+              add_particle(*new_particles, particles.pos[i], particles.vel[i], particles.type[i] - xx (particles.type[i] > r));
+          }
+          ImGui.PopStyleColor(4);
+          ImGui.PopID();
+
+          ImGui.TableSetColumnIndex(1);
           ImGui.PushID(free_id); free_id += 1;
           ImGui.ColorEdit3("", *state.particle_colors[r].xyz.component, ImGui.ColorEditFlags.NoLabel | ImGui.ColorEditFlags.NoInputs);
           ImGui.PopID();
-          for c: 1..NUM_PARTICLE_TYPES {
+          for c: 2..state.particle_types+1 {
+            a_id := r * state.particle_types + c - 2;
+            a := state.attraction_matrix[a_id];
             ImGui.TableSetColumnIndex(xx c);
             ImGui.PushID(free_id); free_id += 1;
             ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().x);
-            a := state.attraction_matrix[r * NUM_PARTICLE_TYPES + c - 1];
-            ImGui.PushStyleColor(.SliderGrab, ImGui.ImVec4.{0, 0, 0, 0});
-            ImGui.PushStyleColor(.SliderGrabActive, ImGui.ImVec4.{0, 0, 0, 0.3});
-            ImGui.PushStyleColor(.FrameBg,        ImGui.ImVec4.{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
-            ImGui.PushStyleColor(.FrameBgHovered, ImGui.ImVec4.{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
-            ImGui.PushStyleColor(.FrameBgActive,  ImGui.ImVec4.{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
-            ImGui.SliderFloat("", *state.attraction_matrix[r * NUM_PARTICLE_TYPES + c - 1], -1., 1., "");
+            ImGui.PushStyleColor(.SliderGrab, .{0, 0, 0, 0});
+            ImGui.PushStyleColor(.SliderGrabActive, .{0, 0, 0, 0.3});
+            ImGui.PushStyleColor(.FrameBg,        .{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
+            ImGui.PushStyleColor(.FrameBgHovered, .{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
+            ImGui.PushStyleColor(.FrameBgActive,  .{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
+            ImGui.SliderFloat("", *state.attraction_matrix[a_id], -1., 1., "");
             if ImGui.IsItemHovered() || ImGui.IsItemActive()
-              ImGui.SetTooltip("%", formatFloat(state.attraction_matrix[r * NUM_PARTICLE_TYPES + c - 1], trailing_width=2));
+              ImGui.SetTooltip("%", formatFloat(state.attraction_matrix[a_id], trailing_width=2));
+            if ImGui.IsItemHovered() {
+              scroll := ImGui.GetIO().MouseWheel;
+              if scroll != 0 {
+                state.attraction_matrix[a_id] += scroll * 0.05;
+                state.attraction_matrix[a_id] = clamp(state.attraction_matrix[a_id], -1., 1.);
+              }
+            }
             ImGui.PopStyleColor(5);
             ImGui.PopID();
           }
         }
+
+        if removed_color {
+          array_free(state.attraction_matrix);
+          state.attraction_matrix = new_attracrtion_matrix;
+          array_free(state.particle_colors);
+          state.particle_colors = new_particle_colors;
+          free_particles(particles);
+          particles = new_particles;
+          state.active_tool.particle_type = -1; // So we don't leave it in an invalid state;
+        }
+
         ImGui.EndTable();
         ImGui.PopStyleVar();
+
+        if ImGui.Button("Randomize") randomize_attraction_matrix(state);
+        ImGui.SameLine();
+        if ImGui.Button("Save") print("attraction_matrix = %\n", state.attraction_matrix);
         ImGui.TreePop();
+      }
+      ImGui.NewLine();
+      if ImGui.BeginCombo("Active Tool", TOOL_NAMES[state.active_tool.type].data) {
+        for TOOL_NAMES {
+          is_selected := xx state.active_tool.type == it_index;
+          if ImGui.Selectable(it.data, is_selected)
+            state.active_tool.type = xx it_index;
+          if is_selected ImGui.SetItemDefaultFocus();
+        }
+        ImGui.EndCombo();
+      }
+      if state.active_tool.type == {
+        case .Attract; #through;
+        case .Repel;
+          ImGui.SliderFloat("Force",  *state.active_tool.force, 0., 1.);
+          ImGui.SliderFloat("Radius", *state.active_tool.radius, 10., state.world_size.x);
+        case .Spawn;
+          ImGui.SliderInt  ("Count", *state.active_tool.count, 0, 1000);
+          colored_combo := state.active_tool.particle_type + 1 > 0;
+          if colored_combo {
+            col := state.particle_colors[state.active_tool.particle_type].xyz;
+            ImGui.PushStyleColor(.FrameBg, .{col.x, col.y, col.z, 1.});
+            ImGui.PushStyleColor(.FrameBgHovered, .{col.x, col.y, col.z, 0.8});
+            ImGui.PushStyleColor(.FrameBgActive, .{col.x, col.y, col.z, 0.6});
+          }
+          if ImGui.BeginCombo("Color", ifx state.active_tool.particle_type == -1 "Random".data else "".data) {
+            is_selected := state.active_tool.particle_type == -1;
+            ImGui.PushID(free_id); free_id += 1;
+            if ImGui.Selectable("Random", is_selected)
+              state.active_tool.particle_type = -1;
+            ImGui.PopID();
+            if is_selected ImGui.SetItemDefaultFocus();
+
+            for 0..state.particle_types-1 {
+              is_selected = state.active_tool.particle_type == it;
+              ImGui.PushID(free_id); free_id += 1;
+              if ImGui.Selectable("", is_selected)
+                state.active_tool.particle_type = it;
+              ImGui.PopID();
+              col := state.particle_colors[it - 0].xyz;
+              SelectableColor(ImGui.GetColorU32(.{col.x, col.y, col.z, 1.}));
+              if is_selected ImGui.SetItemDefaultFocus();
+            }
+
+            ImGui.EndCombo();
+          }
+          if colored_combo ImGui.PopStyleColor(3);
       }
     }
     ImGui.End();
@@ -779,6 +908,13 @@ main :: () {
   }
   SDL_DestroyWindow(window);
   SDL_Quit();
+}
+
+SelectableColor :: (color: ImGui.ImU32 )
+{
+  p_min := ImGui.GetItemRectMin();
+  p_max := ImGui.GetItemRectMax();
+  ImGui.ImDrawList.AddRectFilled(ImGui.GetWindowDrawList(), p_min, p_max, color);
 }
 
 screen_to_world :: (screen: Vector2, state: Simulation_State, camera: Camera) -> Vector2 {
