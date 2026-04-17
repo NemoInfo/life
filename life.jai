@@ -1,21 +1,23 @@
 WORLD_VS :: #run tprint(#string GLSL
-#version 330 core
+#version 430 core
 
 layout (location = 0) in vec2 vertex_pos;
 layout (location = 1) in vec2 particle_pos;
 layout (location = 2) in int  particle_type;
+layout(std430, binding = 4) buffer ColorBuffer {
+    vec4 colors[];
+};
 
 out vec2 out_vertex_pos;
 out vec4 out_vertex_col; 
 
 uniform vec2  u_resolution;
 uniform vec2  u_world_size;
-uniform vec4  u_color_types[%2];
 const float PARTICLE_RADIUS = %1;
 
 void main() {
   out_vertex_pos = vertex_pos;
-  out_vertex_col = u_color_types[particle_type];
+  out_vertex_col = colors[particle_type];
 
   vec2 world_pos  = particle_pos + vertex_pos * PARTICLE_RADIUS;
   vec2 scale   = u_resolution / u_world_size;
@@ -25,7 +27,7 @@ void main() {
   ndc.y    = -ndc.y;
   gl_Position = vec4(ndc, 0.0, 1.0);
 }
-GLSL, PARTICLE_RADIUS, MAX_PARTICLE_TYPES);
+GLSL, PARTICLE_RADIUS);
 
 WORLD_FS :: #string GLSL
 #version 330 core
@@ -117,7 +119,7 @@ layout(std430, binding = 2) buffer TypeBuffer {
 };
 
 layout(std430, binding = 3) buffer AttractionBuffer {
-    float A[];
+    float attraction_matrix[];
 };
 
 uniform vec2  u_worldSize;
@@ -149,7 +151,7 @@ void main() {
     r.y += u_worldSize.y * float(r.y < -u_worldSize.y * 0.5);
     float r_len = length(r);
     if (r_len > u_rMax) continue;
-    float a = A[type[i] * u_numParticleTypes + type[j]];
+    float a = attraction_matrix[type[i] * u_numParticleTypes + type[j]];
     total_a += (r / r_len) * force(r_len / u_rMax, a);
   }
   vel[i] *= u_frictionFactor;
@@ -167,26 +169,22 @@ f32 :: float32;
 f64 :: float64;
 
 PARTICLE_RADIUS           :: 2.;
-NUM_PARTICLE_TYPES        :: 10;
-MAX_PARTICLE_TYPES        :: 32;
+NUM_PARTICLE_TYPES        :: 8;
 NUM_PARTICLES             :: 20_000;
 PIXELS_PER_WORLD_UNIT     :: 10;
 R_MAX                     :: 100.;
 T_HALF                    :: 0.04;
 PARTICLES_PER_WORK_GROUPS :: 256;
 
-A:               [..] f32;
-PARTICLE_COLORS: [MAX_PARTICLE_TYPES] Vector4;
-
-Simulation_State:  : struct {
-  world_size:      Vector2 = .{1920*3., 1080*3.};
-  resolution:      Vector2 = #run .{1920., 1080.} * PIXELS_PER_WORLD_UNIT;
-  window_size:     Vector2 = .{1920., 1080.};
-  dt:              f32;
-  time_last_frame: Apollo_Time;
-  exit:            bool = false;
-  fps_counter:     int = 0;
-  fps_timer:       f32 = 0;
+Simulation_State :: struct {
+  world_size:        Vector2 = .{1920*3., 1080*3.};
+  attraction_matrix: [..] f32;
+  particle_colors:   [..] Vector4;
+  resolution:        Vector2 = #run .{1920., 1080.} * PIXELS_PER_WORLD_UNIT;
+  window_size:       Vector2 = .{1920., 1080.};
+  dt:                f32;
+  time_last_frame:   Apollo_Time;
+  exit:              bool = false;
 }
 
 Camera_Uniform :: struct {
@@ -221,11 +219,12 @@ Compute_Binding :: struct {
 }
 
 World_Binding :: struct {
-  vao:      GLuint;
-  quad_vbo: GLuint;
-  pos_vbo:  GLuint;
-  type_vbo: GLuint;
-  shader:   GLuint;
+  vao:        GLuint;
+  quad_vbo:   GLuint;
+  pos_vbo:    GLuint;
+  type_vbo:   GLuint;
+  color_ssbo: GLuint;
+  shader:     GLuint;
 }
 
 Tile_Binding :: struct {
@@ -388,7 +387,7 @@ create_compute_binding :: (particles_count: s64, attraction_matrix: [] f32) -> C
   // location = 3 pos Vector2
   glGenBuffers     (1, *b.a_ssbo);
   glBindBuffer     (GL_SHADER_STORAGE_BUFFER, b.a_ssbo);
-  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(f32) * attraction_matrix.count, attraction_matrix.data, GL_STATIC_DRAW);
+  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(f32) * attraction_matrix.count, attraction_matrix.data, GL_DYNAMIC_COPY);
   glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 3, b.a_ssbo);
 
   glBindBuffer    (GL_SHADER_STORAGE_BUFFER, 0);
@@ -406,8 +405,8 @@ compute_pass :: (using b: Compute_Binding, particles: *Particles, state: Simulat
   glBufferSubData (GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector2) * particles.count, particles.vel.data);
   glBindBuffer    (GL_SHADER_STORAGE_BUFFER, type_ssbo);
   glBufferSubData (GL_SHADER_STORAGE_BUFFER, 0, size_of(u32) * particles.count, particles.type.data);
-  // glBindBuffer    (GL_SHADER_STORAGE_BUFFER, a_ssbo);
-  // glBufferSubData (GL_SHADER_STORAGE_BUFFER, size_of(f32) * attraction_matrix.count, attraction_matrix.data);
+  glBindBuffer    (GL_SHADER_STORAGE_BUFFER, a_ssbo);
+  glBufferSubData (GL_SHADER_STORAGE_BUFFER, 0, size_of(f32) * state.attraction_matrix.count, state.attraction_matrix.data);
   glBindBuffer    (GL_SHADER_STORAGE_BUFFER, 0);
 
   // Set uniforms
@@ -502,7 +501,7 @@ tile_render_pass :: (
 
 create_world_binding :: (particles_count: s64) -> World_Binding {
     using gl;
-    using layout : World_Binding;
+    using layout :World_Binding;
     glGenVertexArrays(1, *vao);
     glBindVertexArray(vao);
 
@@ -529,8 +528,14 @@ create_world_binding :: (particles_count: s64) -> World_Binding {
     glEnableVertexAttribArray(2);
     glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, size_of(u32), null);
     glVertexAttribDivisor(2, 1);
-
     glBindVertexArray(0);
+
+    glGenBuffers     (1, *color_ssbo);
+    glBindBuffer     (GL_SHADER_STORAGE_BUFFER, color_ssbo);
+    glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(Vector4) * NUM_PARTICLE_TYPES, null, GL_DYNAMIC_DRAW);
+    glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 4, color_ssbo);
+    glBindBuffer    (GL_SHADER_STORAGE_BUFFER, 0);
+
     shader = create_shader_program(WORLD_VS, WORLD_FS);
     return layout;
 }
@@ -555,11 +560,12 @@ world_render_pass :: (
   glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
   glBufferData(GL_ARRAY_BUFFER, size_of(u32) * instances.count, instances.type.data, GL_DYNAMIC_DRAW);
 
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, color_ssbo);
+  glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector4) * particle_colors.count, particle_colors.data);
+
   glUseProgram(shader);
   glUniform2f (glGetUniformLocation(shader, "u_world_size"),  world_size.x, world_size.y);
   glUniform2f (glGetUniformLocation(shader, "u_resolution"),  resolution.x, resolution.y);
-  // @TODO: this should be a buffer
-  glUniform4fv(glGetUniformLocation(shader, "u_color_types"), MAX_PARTICLE_TYPES, *PARTICLE_COLORS[0].x);
 
   glBindVertexArray(vao);
   glEnable(GL_BLEND); 
@@ -571,18 +577,19 @@ world_render_pass :: (
 }
 
 
-init_simulation :: (particles: *Particles, world_size: Vector2) {
+init_simulation :: (particles: *Particles, using state: Simulation_State) {
   seed := transmute(u64, to_seconds(current_time_monotonic()));
   // seed = 14183857;
   random_seed(seed);
   print("seed = %;\n", seed);
 
-  for *PARTICLE_COLORS if it_index < NUM_PARTICLE_TYPES
-    it.* = .{xyz=hsl_to_rgb01(360. * it_index / NUM_PARTICLE_TYPES, 1., .8), w=1.};
+  array_resize(*particle_colors, NUM_PARTICLE_TYPES);
+  for *particle_colors 
+    it.* = .{xyz=hsl_to_rgb01(360. * it_index / (NUM_PARTICLE_TYPES + 1), 1., .7), w=1.};
 
-  array_resize(*A, NUM_PARTICLE_TYPES * NUM_PARTICLE_TYPES);
-  for *A it.* = random_get_within_range(-1., 1.);
-  print("A = %\n", A);
+  array_resize(*attraction_matrix, NUM_PARTICLE_TYPES * NUM_PARTICLE_TYPES);
+  for *attraction_matrix it.* = random_get_within_range(-1., 1.);
+  print("attraction_matrix = %\n", attraction_matrix);
 
   for 0..NUM_PARTICLES-1 add_particle(particles, 
     .{random_get_within_range(-world_size.x/2, world_size.x/2), 
@@ -635,6 +642,9 @@ main :: () {
   }
 
   SDL_GL_SetSwapInterval(0);
+  imgui_context := ImGui.CreateContext();
+  ImGui_ImplSdl_Init(window);
+  ImGui.StyleColorsDark(); 
 
   gl_load(*gl, SDL_GL_GetProcAddress);
   using gl;
@@ -644,11 +654,18 @@ main :: () {
   print("GL Renderer = %\n", to_string(glGetString(GL_RENDERER)));
 
   particles: Particles;
-  init_simulation(*particles, state.world_size);
+  init_simulation(*particles, state);
 
   world_binding   := create_world_binding (particles.count);
   tile_binding    := create_tile_binding(state.resolution);
-  compute_binding := create_compute_binding(particles.count, A);
+  compute_binding := create_compute_binding(particles.count, state.attraction_matrix);
+  io := ImGui.GetIO();
+  config: ImGui.ImFontConfig;
+  ImGui.ImFontConfig.Constructor(*config);
+  config.OversampleH = 4;
+  config.OversampleV = 4;
+  font := io.Fonts.AddFontFromFileTTF(io.Fonts, "assets/JetBrainsMonoNerdFont-Regular.ttf", 24.0, *config, null);
+  io.FontDefault = font;
 
   camera: Camera;
   state.time_last_frame = current_time_monotonic();
@@ -656,19 +673,12 @@ main :: () {
     time_this_frame := current_time_monotonic();
     state.dt = xx to_float64_seconds(time_this_frame - state.time_last_frame);
     state.time_last_frame = time_this_frame;
-    state.fps_timer   += state.dt;
-    state.fps_counter += 1;
-    if state.fps_timer > 1. {
-      title := tprint("Particle Sim | FPS: %\0", state.fps_counter);
-      SDL_SetWindowTitle(window, title.data);
-      state.fps_timer, state.fps_counter = 0, 0;
-    }
 
     event : SDL_Event;
     while SDL_PollEvent(*event) {
-      if event.type == {
-        case SDL_QUIT; state.exit = true;
-        case SDL_KEYUP; if event.key.keysym.sym == SDLK_ESCAPE state.exit = true;
+      ImGui_ImplSdl_ProcessEvent(*event);
+      if !io.WantCaptureMouse && !io.WantCaptureKeyboard {
+        if event.type == {
         case SDL_WINDOWEVENT;
           if event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED
             state.window_size = .{xx event.window.data1, xx event.window.data2};
@@ -697,14 +707,73 @@ main :: () {
           camera.zoom   = clamp(camera.zoom, 0.5 / PIXELS_PER_WORLD_UNIT, 20. / PIXELS_PER_WORLD_UNIT);
           world_after  := screen_to_world(mouse, state, camera);
           camera.pos   += world_before - world_after;
+        case SDL_KEYUP; if event.key.keysym.sym == SDLK_ESCAPE state.exit = true;
+        }
+      }
+
+      if event.type == {
+        case SDL_QUIT; state.exit = true;
       }
     }
+
+    ImGui_ImplSdl_NewFrame(window);
+    ImGui.NewFrame();
+    ImGui.SetNextWindowPos(.{10, 10}, ImGui.Cond.FirstUseEver, .{0, 0});
+    ImGui.SetNextWindowSize(.{200, 80}, ImGui.Cond.FirstUseEver);
+    free_id : s32 = 1;
+    if ImGui.Begin("Performance", null, ImGui.WindowFlags.NoTitleBar | ImGui.WindowFlags.AlwaysAutoResize) {
+      ImGui.TextColored(.{0, 1, 0, 1}, "FPS: %", cast(s64) io.Framerate);
+      ImGui.Text("Particles: %", particles.count);
+
+      if ImGui.TreeNode("Attraction Matrix") {
+        ImGui.PushStyleVar(.CellPadding, ImGui.ImVec2.{4, 4});
+        ImGui.BeginTable("Attraction Matrix", NUM_PARTICLE_TYPES + 1);
+        ImGui.TableNextRow();
+        for c: 1..NUM_PARTICLE_TYPES {
+          ImGui.TableSetColumnIndex(xx c);
+          ImGui.PushID(free_id); free_id += 1;
+          ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().x);
+          ImGui.ColorEdit3("", *state.particle_colors[c-1].xyz.component, ImGui.ColorEditFlags.NoLabel | ImGui.ColorEditFlags.NoInputs);
+          ImGui.PopID();
+        }
+        for r: 0..NUM_PARTICLE_TYPES-1 {
+          ImGui.TableNextRow();
+          ImGui.TableSetColumnIndex(0);
+          ImGui.PushID(free_id); free_id += 1;
+          ImGui.ColorEdit3("", *state.particle_colors[r].xyz.component, ImGui.ColorEditFlags.NoLabel | ImGui.ColorEditFlags.NoInputs);
+          ImGui.PopID();
+          for c: 1..NUM_PARTICLE_TYPES {
+            ImGui.TableSetColumnIndex(xx c);
+            ImGui.PushID(free_id); free_id += 1;
+            ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().x);
+            a := state.attraction_matrix[r * NUM_PARTICLE_TYPES + c - 1];
+            ImGui.PushStyleColor(.SliderGrab, ImGui.ImVec4.{0, 0, 0, 0});
+            ImGui.PushStyleColor(.SliderGrabActive, ImGui.ImVec4.{0, 0, 0, 0.3});
+            ImGui.PushStyleColor(.FrameBg,        ImGui.ImVec4.{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
+            ImGui.PushStyleColor(.FrameBgHovered, ImGui.ImVec4.{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
+            ImGui.PushStyleColor(.FrameBgActive,  ImGui.ImVec4.{0.5 - a/2, a/2+0.5, 0, pow(abs(a), 0.5)});
+            ImGui.SliderFloat("", *state.attraction_matrix[r * NUM_PARTICLE_TYPES + c - 1], -1., 1., "");
+            if ImGui.IsItemHovered() || ImGui.IsItemActive()
+              ImGui.SetTooltip("%", formatFloat(state.attraction_matrix[r * NUM_PARTICLE_TYPES + c - 1], trailing_width=2));
+            ImGui.PopStyleColor(5);
+            ImGui.PopID();
+          }
+        }
+        ImGui.EndTable();
+        ImGui.PopStyleVar();
+        ImGui.TreePop();
+      }
+    }
+    ImGui.End();
+
     compute_pass(compute_binding, *particles, state);
     wrap_count := wrap_particle_instances(*particles.instances, state.world_size);
     defer remove_n_instances_from_end(*particles.instances, wrap_count);
     world_render_pass(*world_binding, *state, camera, particles.instances, tile_binding.framebuffer);
     tile_render_pass (*tile_binding,  *state, camera);
 
+    ImGui.Render();
+    ImGui_ImplSdl_RenderDrawLists(ImGui.GetDrawData());
     SDL_GL_SwapWindow(window);
     reset_temporary_storage();
   }
@@ -751,3 +820,4 @@ hsl_to_rgb01 :: (h: f32, s: f32, l: f32) -> Vector3 {
 #import "GL";
 #import "Math";
 #import "Random";
+#load "imgui_sd_gl.jai";
