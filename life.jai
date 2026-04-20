@@ -178,13 +178,13 @@ Simulation_State :: struct {
   world_size:        Vector2 = .{1920*3., 1080*3.};
   attraction_matrix: [..] f32;
   particle_colors:   [..] Vector4;
-  #overlay (particle_colors.count) particle_types: s64;
+  #overlay (particle_colors.count) num_types: s64;
   resolution:        Vector2 = #run .{1920., 1080.} * PIXELS_PER_WORLD_UNIT;
   window_size:       Vector2 = .{1920., 1080.};
   dt:                f32;
   time_last_frame:   Apollo_Time;
   exit:              bool = false;
-  active_tool:       Tool;
+  tool:              Tool;
 }
 
 ToolType :: enum s32 {
@@ -209,9 +209,14 @@ Tool :: struct {
   particle_type: s64 = -1;
 }
 
-ShapeType :: enum {
+ShapeType :: enum s64 {
   Circle;
   Square;
+}
+
+SHAPE_NAMES :: #run -> [] string {
+    info := cast(*Type_Info_Enum) type_info(ShapeType);
+    return info.names;
 }
 
 Camera_Uniform :: struct {
@@ -445,7 +450,7 @@ compute_pass :: (using b: Compute_Binding, particles: *Particles, state: Simulat
   glUniform1f(glGetUniformLocation(shader, "u_rMax"), R_MAX);
   glUniform1f(glGetUniformLocation(shader, "u_frictionFactor"), pow(0.5, state.dt / T_HALF));
   glUniform1i(glGetUniformLocation(shader, "u_numParticles"), xx particles.count);
-  glUniform1i(glGetUniformLocation(shader, "u_numParticleTypes"), xx state.particle_types);
+  glUniform1i(glGetUniformLocation(shader, "u_numParticleTypes"), xx state.num_types);
 
   work_groups := (particles.count + PARTICLES_PER_WORK_GROUPS - 1) / PARTICLES_PER_WORK_GROUPS;
   glDispatchCompute(xx work_groups, 1, 1);
@@ -559,7 +564,7 @@ create_world_binding :: (particles_count: s64, state: Simulation_State) -> World
 
   glGenBuffers     (1, *color_ssbo);
   glBindBuffer     (GL_SHADER_STORAGE_BUFFER, color_ssbo);
-  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(Vector4) * state.particle_types, null, GL_DYNAMIC_DRAW);
+  glBufferData     (GL_SHADER_STORAGE_BUFFER, size_of(Vector4) * state.num_types, null, GL_DYNAMIC_DRAW);
   glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 4, color_ssbo);
 
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
@@ -588,7 +593,7 @@ world_render_pass :: (
   glBufferData(GL_ARRAY_BUFFER, size_of(u32) * instances.count, instances.type.data, GL_DYNAMIC_DRAW);
 
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, color_ssbo);
-  glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector4) * particle_types, particle_colors.data);
+  glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, size_of(Vector4) * num_types, particle_colors.data);
 
   glUseProgram(shader);
   glUniform2f (glGetUniformLocation(shader, "u_world_size"),  world_size.x, world_size.y);
@@ -604,35 +609,36 @@ world_render_pass :: (
 }
 
 
-init_simulation :: (particles: *Particles, using state: Simulation_State, num_particles: s64 = 20_000, num_particle_types : s64 = 6) {
+init_simulation :: (particles: *Particles, using state: *Simulation_State, num_particles: s64 = 20_000, num_particle_types : s64 = 6) {
   seed := transmute(u64, to_seconds(current_time_monotonic()));
   random_seed(seed);
-  print("seed = %;\n", seed);
 
+  array_free(particle_colors);
   array_resize(*particle_colors, num_particle_types);
-  for *particle_colors 
-    it.* = .{xyz=hsl_to_rgb01(360. * it_index / (num_particle_types + 1), 1., .7), w=1.};
+  for *particle_colors it.* = .{xyz=hsl_to_rgb01(360. * it_index / (num_particle_types + 1), 1., .7), w=1.};
 
   randomize_attraction_matrix(state);
-
-  for 0..num_particles-1 add_particle(particles, 
-    .{random_get_within_range(-world_size.x/2, world_size.x/2), 
-      random_get_within_range(-world_size.y/2, world_size.y/2)},
-    .{random_get_within_range(-10., 10.), 
-      random_get_within_range(-10., 10.)},
-    cast(u32) (random_get() % xx num_particle_types),
-  );
+  
+  array_resize(*particles.*.pos, num_particles);
+  array_resize(*particles.*.vel, num_particles);
+  array_resize(*particles.*.type, num_particles);
+  for 0..num_particles-1 {
+    particles.*.pos[it] = .{random_get_within_range(-world_size.x/2, world_size.x/2), 
+                            random_get_within_range(-world_size.y/2, world_size.y/2)};
+    particles.*.vel[it] = .{random_get_within_range(-10., 10.), 
+                            random_get_within_range(-10., 10.)};
+    particles.*.type[it] = cast(u32) (random_get() % xx num_particle_types);
+  }
 }
 
 randomize_attraction_matrix :: (using state: Simulation_State) {
-  array_resize(*attraction_matrix, state.particle_types * state.particle_types);
+  array_free(attraction_matrix);
+  array_resize(*attraction_matrix, state.num_types * state.num_types);
   for *attraction_matrix it.* = random_get_within_range(-1., 1.);
 }
 
-force :: (r: f32, a: f32, beta: f32 = 0.3) -> f32 {
-  if r < beta return r / beta - 1.;
-  if r < 1.   return a * (1. - abs(2.*r-1-beta)/(1-beta));
-  return 0.;
+update_particles_from_state :: (using particles: Particles, using state: Simulation_State) {
+
 }
 
 main :: () {
@@ -680,7 +686,7 @@ main :: () {
   print("GL Renderer = %\n", to_string(glGetString(GL_RENDERER)));
 
   particles: Particles;
-  init_simulation(*particles, state);
+  init_simulation(*particles, *state);
 
   world_binding   := create_world_binding(particles.count, state);
   tile_binding    := create_tile_binding(state.resolution);
@@ -756,6 +762,7 @@ main :: () {
       ImGui.SetCursorPosX(window_width - text_width - ImGui.GetStyle().WindowPadding.x);
       ImGui.Text("particles: %", particles.count);
       ImGui.NewLine();
+      if ImGui.Button("Reset Simulation") init_simulation(*particles, *state, particles.count, state.num_types);
       if ImGui.TreeNode("Attraction Matrix") {
         new_particle_colors : [..] Vector4;
         new_attracrtion_matrix : [..] f32;
@@ -763,16 +770,16 @@ main :: () {
         removed_color := false;
 
         ImGui.PushStyleVar(.CellPadding, ImGui.ImVec2.{4, 4});
-        ImGui.BeginTable("Attraction Matrix", xx (state.particle_types + 2));
+        ImGui.BeginTable("Attraction Matrix", xx (state.num_types + 2));
         ImGui.TableNextRow();
-        for c: 2..state.particle_types + 1 {
+        for c: 2..state.num_types + 1 {
           ImGui.TableSetColumnIndex(xx c);
           ImGui.PushID(free_id); free_id += 1;
           ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().x);
           ImGui.ColorEdit3("", *state.particle_colors[c-2].xyz.component, ImGui.ColorEditFlags.NoLabel | ImGui.ColorEditFlags.NoInputs);
           ImGui.PopID();
         }
-        for r: 0..state.particle_types - 1 {
+        for r: 0..state.num_types - 1 {
           ImGui.TableNextRow();
 
           ImGui.TableSetColumnIndex(0);
@@ -784,12 +791,12 @@ main :: () {
           ImGui.PushStyleColor(.ButtonActive,  .{1., 0, 0, 1.});
           if ImGui.Button("x") {
             removed_color = true;
-            for i: 0..state.particle_types - 1 if i != r
+            for i: 0..state.num_types - 1 if i != r
               array_add(*new_particle_colors, state.particle_colors[i]);
 
-            for i: 0..state.particle_types - 1 if i != r
-              for j: 0..state.particle_types - 1 if j != r
-                array_add(*new_attracrtion_matrix, state.attraction_matrix[i*state.particle_types + j]);
+            for i: 0..state.num_types - 1 if i != r
+              for j: 0..state.num_types - 1 if j != r
+                array_add(*new_attracrtion_matrix, state.attraction_matrix[i*state.num_types + j]);
 
             for i: 0..particles.count - 1 if particles.type[i] != r
               add_particle(*new_particles, particles.pos[i], particles.vel[i], particles.type[i] - xx (particles.type[i] > r));
@@ -801,8 +808,8 @@ main :: () {
           ImGui.PushID(free_id); free_id += 1;
           ImGui.ColorEdit3("", *state.particle_colors[r].xyz.component, ImGui.ColorEditFlags.NoLabel | ImGui.ColorEditFlags.NoInputs);
           ImGui.PopID();
-          for c: 2..state.particle_types+1 {
-            a_id := r * state.particle_types + c - 2;
+          for c: 2..state.num_types+1 {
+            a_id := r * state.num_types + c - 2;
             a := state.attraction_matrix[a_id];
             ImGui.TableSetColumnIndex(xx c);
             ImGui.PushID(free_id); free_id += 1;
@@ -834,7 +841,7 @@ main :: () {
           state.particle_colors = new_particle_colors;
           free_particles(particles);
           particles = new_particles;
-          state.active_tool.particle_type = -1; // So we don't leave it in an invalid state;
+          state.tool.particle_type = -1; // So we don't leave it in an invalid state;
         }
 
         ImGui.EndTable();
@@ -846,42 +853,43 @@ main :: () {
         ImGui.TreePop();
       }
       ImGui.NewLine();
-      if ImGui.BeginCombo("Active Tool", TOOL_NAMES[state.active_tool.type].data) {
+      if ImGui.BeginCombo("Tool", TOOL_NAMES[state.tool.type].data) {
         for TOOL_NAMES {
-          is_selected := xx state.active_tool.type == it_index;
+          is_selected := xx state.tool.type == it_index;
           if ImGui.Selectable(it.data, is_selected)
-            state.active_tool.type = xx it_index;
+            state.tool.type = xx it_index;
           if is_selected ImGui.SetItemDefaultFocus();
         }
         ImGui.EndCombo();
       }
-      if state.active_tool.type == {
+      if state.tool.type == {
         case .Attract; #through;
         case .Repel;
-          ImGui.SliderFloat("Force",  *state.active_tool.force, 0., 1.);
-          ImGui.SliderFloat("Radius", *state.active_tool.radius, 10., state.world_size.x);
+          ImGui.SliderFloat("Force",  *state.tool.force, 0., 1.);
+          ImGui.SliderFloat("Radius", *state.tool.radius, 10., state.world_size.x);
         case .Spawn;
-          ImGui.SliderInt  ("Count", *state.active_tool.count, 0, 1000);
-          colored_combo := state.active_tool.particle_type + 1 > 0;
+          ImGui.SliderFloat("Radius", *state.tool.radius, 10., state.world_size.x);
+          ImGui.SliderInt  ("Count", *state.tool.count, 0, 1000);
+          colored_combo := state.tool.particle_type + 1 > 0;
           if colored_combo {
-            col := state.particle_colors[state.active_tool.particle_type].xyz;
+            col := state.particle_colors[state.tool.particle_type].xyz;
             ImGui.PushStyleColor(.FrameBg, .{col.x, col.y, col.z, 1.});
             ImGui.PushStyleColor(.FrameBgHovered, .{col.x, col.y, col.z, 0.8});
             ImGui.PushStyleColor(.FrameBgActive, .{col.x, col.y, col.z, 0.6});
           }
-          if ImGui.BeginCombo("Color", ifx state.active_tool.particle_type == -1 "Random".data else "".data) {
-            is_selected := state.active_tool.particle_type == -1;
+          if ImGui.BeginCombo("Color", ifx state.tool.particle_type == -1 "Random".data else "".data) {
+            is_selected := state.tool.particle_type == -1;
             ImGui.PushID(free_id); free_id += 1;
             if ImGui.Selectable("Random", is_selected)
-              state.active_tool.particle_type = -1;
+              state.tool.particle_type = -1;
             ImGui.PopID();
             if is_selected ImGui.SetItemDefaultFocus();
 
-            for 0..state.particle_types-1 {
-              is_selected = state.active_tool.particle_type == it;
+            for 0..state.num_types-1 {
+              is_selected = state.tool.particle_type == it;
               ImGui.PushID(free_id); free_id += 1;
               if ImGui.Selectable("", is_selected)
-                state.active_tool.particle_type = it;
+                state.tool.particle_type = it;
               ImGui.PopID();
               col := state.particle_colors[it - 0].xyz;
               SelectableColor(ImGui.GetColorU32(.{col.x, col.y, col.z, 1.}));
@@ -891,6 +899,16 @@ main :: () {
             ImGui.EndCombo();
           }
           if colored_combo ImGui.PopStyleColor(3);
+
+          if ImGui.BeginCombo("Shape", SHAPE_NAMES[xx state.tool.shape].data) {
+            for SHAPE_NAMES {
+              is_selected := xx state.tool.shape == it_index;
+              if ImGui.Selectable(it.data, is_selected)
+                state.tool.shape = xx it_index;
+              if is_selected ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+          }
       }
     }
     ImGui.End();
