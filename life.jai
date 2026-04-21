@@ -294,7 +294,8 @@ main :: () {
                 it := 0; while it < particles.count - 1 {
                   r := target - particles.pos[it];
                   wrap_distance(*r, state.world_size);
-                  if cond(r, state.tool.radius) 
+                  if cond(r, state.tool.radius) && 
+                    (state.tool.color == -1 || state.tool.color == particles.type[it])
                     particles_delete(*particles, it);
                   else it += 1;
                 }
