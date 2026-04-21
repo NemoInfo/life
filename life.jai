@@ -11,6 +11,7 @@ Simulation_State :: struct {
   time_last_frame:   Apollo_Time;
   exit:              bool = false;
   paused:            bool = false;
+  gui_hidden:        bool = false;
   tool:              Tool;
 }
 
@@ -85,12 +86,12 @@ Tile_Binding :: struct {
   shader:        GLuint;
 }
 
-particles_ghost_add :: (using particles: *Particles, new_pos: Vector2, new_type: u32) {
+particles_add_ghost :: (using particles: *Particles, new_pos: Vector2, new_type: u32) {
   array_add(*pos,  new_pos);
   array_add(*type, new_type);
 }
 
-particles_ghost_pop :: (using particles: *Particles, n :s64= 1) {
+particles_pop_ghost :: (using particles: *Particles, n :s64= 1) {
   pos.count  -= n;
   type.count -= n;
 }
@@ -121,17 +122,17 @@ wrap_distance :: (r: *Vector2, world_size: Vector2) {
   r.* += world_size * (r < -world_size * 0.5);
 }
 
-wrap_particles :: (particles: *Particles, world_size: Vector2) -> s64 {
+particles_add_wrap_ghosts :: (particles: *Particles, world_size: Vector2) -> s64 {
   init_count := particles.count;
   for 0..init_count-1 {
     if particles.pos[it].x > world_size.x * 0.5 - PARTICLE_RADIUS
-      particles_ghost_add(particles, particles.pos[it] - .{world_size.x,0}, particles.type[it]);
+      particles_add_ghost(particles, particles.pos[it] - .{world_size.x,0}, particles.type[it]);
     if particles.pos[it].x < -world_size.x * 0.5 + PARTICLE_RADIUS
-      particles_ghost_add(particles, particles.pos[it] + .{world_size.x,0}, particles.type[it]);
+      particles_add_ghost(particles, particles.pos[it] + .{world_size.x,0}, particles.type[it]);
     if particles.pos[it].y > world_size.y * 0.5 - PARTICLE_RADIUS
-      particles_ghost_add(particles, particles.pos[it] - .{0,world_size.y}, particles.type[it]);
+      particles_add_ghost(particles, particles.pos[it] - .{0,world_size.y}, particles.type[it]);
     if particles.pos[it].y < -world_size.y * 0.5 + PARTICLE_RADIUS
-      particles_ghost_add(particles, particles.pos[it] + .{0,world_size.y}, particles.type[it]);
+      particles_add_ghost(particles, particles.pos[it] + .{0,world_size.y}, particles.type[it]);
   }
   return particles.count - init_count;
 }
@@ -204,7 +205,6 @@ main :: () {
   ImGui.StyleColorsDark(); 
 
   gl_load(*gl, SDL_GL_GetProcAddress);
-  using gl;
 
   println("GL Version = %", to_string(glGetString(GL_VERSION)));
   println("GL Renderer = %", to_string(glGetString(GL_RENDERER)));
@@ -232,6 +232,10 @@ main :: () {
 
     event : SDL_Event;
     while SDL_PollEvent(*event) {
+      if event.type == { // events that superceed gui
+        case SDL_QUIT; state.exit = true;
+      }
+
       ImGui_ImplSdl_ProcessEvent(*event);
       if !io.WantCaptureMouse && !io.WantCaptureKeyboard {
         if event.type == {
@@ -324,13 +328,11 @@ main :: () {
         case SDL_KEYUP; if event.key.keysym.sym == {
             case SDLK_ESCAPE; state.exit = true;
             case SDLK_SPACE;  state.paused = !state.paused;
+            case SDLK_h;      state.gui_hidden = !state.gui_hidden;
           }
         }
       }
 
-      if event.type == {
-        case SDL_QUIT; state.exit = true;
-      }
     }
 
     ImGui_ImplSdl_NewFrame(window);
@@ -338,15 +340,12 @@ main :: () {
     ImGui.SetNextWindowPos(.{10, 10}, ImGui.Cond.FirstUseEver, .{0, 0});
     ImGui.SetNextWindowSize(.{200, 80}, ImGui.Cond.FirstUseEver);
     free_id : s32 = 1;
-    simulation_tools_gui(*state, *particles, camera, *free_id, compute_binding);
-    tool_pointer_gui(*state, *particles, camera, *free_id);
-    ImGui.End();
+    if !state.gui_hidden simulation_tools_gui(*state, *particles, camera, *free_id, compute_binding);
+    tool_pointer_gui(*state, camera, *free_id);
 
-    if !state.paused {
-      compute_pass(compute_binding, *particles, state);
-    }
-    wrap_count := wrap_particles(*particles, state.world_size);
-    defer particles_ghost_pop(*particles, wrap_count);
+    if !state.paused compute_pass(compute_binding, *particles, state);
+    wrap_count := particles_add_wrap_ghosts(*particles, state.world_size);
+    defer particles_pop_ghost(*particles, wrap_count);
     maybe_resize_world_texture(*tile_binding, *state.resolution, state.world_size, camera.zoom);
     world_render_pass(world_binding, particles, state, camera, tile_binding.framebuffer);
     tile_render_pass(tile_binding, state, camera);
@@ -377,25 +376,3 @@ posix :: #import "POSIX";
 #load "shaders.jai";
 #load "util.jai";
 #load "gpu.jai";
-
-// @TODO
-//   ✔  remove radius and maybe color from instance, maybe bake them into the shader?
-//   ✔  implement 2D Camera, switch to world coordonates
-//   ✔  attraction laws
-//   ✔  gui & tools
-//
-// @PERFORMANCE:
-//   ✔  push update to compute shader
-//   - async simulation thread 
-//   - hierarichal structure 
-//
-// @QUALITY:
-//   ✔  fix render to texture pipeline, 
-//      think about how to tie tile resolution to camera zoom
-//   - betteer attraction / reppeleer force profile 
-//   - refactor tiling logic, 
-//     i think it should be slightly simpler
-//   - break the monolith, refactor game loop
-//   - async logging
-//   - fix flickering at distance out
-//   ? add bloom in post

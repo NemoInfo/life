@@ -204,38 +204,45 @@ info_gui :: (state: *Simulation_State, particles: *Particles, camera: Camera, fr
   }
 }
 
-tool_pointer_gui :: (state: *Simulation_State, particles: *Particles, camera: Camera, free_id: *s32) {
-    if state.tool.type == {
-      case .Attract; #through;
-      case .Repel;
-        ImGui.SliderFloat("Force",  *state.tool.force, 0., 1.);
-        ImGui.SliderFloat("Radius", *state.tool.radius, 10., min(state.world_size.x, state.world_size.y) / 2);
-        color := ifx state.tool.type == .Attract then ImGui.ImVec4.{0, 1, 0, .5} else .{1, 0, 0, .5};
-        circle_shape_pointer(state, camera, color);
-      case .Delete;
-        if ImGui.Button("Delete All") { 
-          array_resize(*particles.pos, 0);
-          array_resize(*particles.vel, 0);
-          array_resize(*particles.type, 0);
-        }
-        ImGui.SliderFloat("Radius", *state.tool.radius, 10., min(state.world_size.x, state.world_size.y) / 2);
-        color_gui(state, particles, free_id);
-        shape_gui(state, particles, free_id);
-        if state.tool.shape == {
-          case .Circle; circle_shape_pointer(state, camera, .{1, 0, 0, .5});
-          case .Square; square_shape_pointer(state, camera, .{1, 0, 0, .5});
-        }
-      case .Spawn;
-        ImGui.SliderFloat("Radius", *state.tool.radius, 10., state.world_size.x);
-        ImGui.SliderInt  ("Count", *state.tool.count, 0, 1000);
-        color_gui(state, particles, free_id);
-        shape_gui(state, particles, free_id);
-        if state.tool.shape == {
-          case .Circle; circle_shape_pointer(state, camera, .{0, 1, 1, .5});
-          case .Square; square_shape_pointer(state, camera, .{0, 1, 1, .5});
-        }
-    }
+tool_pointer_gui :: (state: *Simulation_State, camera: Camera, free_id: *s32) {
+  color: ImGui.ImVec4;
+  if state.tool.type == {
+    case .Attract; color = .{0, 1, 0, .5};
+    case .Repel;   color = .{1, 0, 0, .5};
+    case .Delete;  color = .{1, 0, 0, .5};
+    case .Spawn;   color = .{0, 1, 1, .5};
+  }
+  if state.tool.type == .Attract || state.tool.type == .Repel
+    circle_shape_pointer(state, camera, color);
+  else if state.tool.shape == {
+    case .Circle; circle_shape_pointer(state, camera, color);
+    case .Square; square_shape_pointer(state, camera, color);
+  }
 }
+
+tool_gui :: (state: *Simulation_State, particles: *Particles, camera: Camera, free_id: *s32) {
+  if state.tool.type == {
+    case .Attract; #through;
+    case .Repel;
+      ImGui.SliderFloat("Force",  *state.tool.force, 0., 1.);
+      ImGui.SliderFloat("Radius", *state.tool.radius, 10., min(state.world_size.x, state.world_size.y) / 2);
+    case .Delete;
+      if ImGui.Button("Delete All") { 
+        array_resize(*particles.pos, 0);
+        array_resize(*particles.vel, 0);
+        array_resize(*particles.type, 0);
+      }
+      ImGui.SliderFloat("Radius", *state.tool.radius, 10., min(state.world_size.x, state.world_size.y) / 2);
+      color_gui(state, particles, free_id);
+      shape_gui(state, particles, free_id);
+    case .Spawn;
+      ImGui.SliderFloat("Radius", *state.tool.radius, 10., state.world_size.x);
+      ImGui.SliderInt  ("Count", *state.tool.count, 0, 1000);
+      color_gui(state, particles, free_id);
+      shape_gui(state, particles, free_id);
+  }
+}
+
 
 simulation_tools_gui :: (state: *Simulation_State, particles: *Particles, camera: Camera, free_id: *s32, compute_binding: Compute_Binding) {
   if ImGui.Begin("Simulation Tools", null, /*ImGui.WindowFlags.NoTitleBar |*/ ImGui.WindowFlags.AlwaysAutoResize) {
@@ -259,8 +266,10 @@ simulation_tools_gui :: (state: *Simulation_State, particles: *Particles, camera
       }
       ImGui.EndCombo();
     }
-  }
 
+    tool_gui(state, particles, camera, free_id);
+  }
+  ImGui.End();
 }
 
 SelectableColor :: (color: ImGui.ImU32 )

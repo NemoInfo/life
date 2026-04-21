@@ -3,7 +3,6 @@ maybe_resize_world_texture :: (tile: *Tile_Binding, resolution: *Vector2, world_
     if target == resolution.* return;
     resolution.* = target;
 
-    using gl;
     glBindTexture(GL_TEXTURE_2D, tile.world_texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
                  xx target.x, xx target.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
@@ -26,7 +25,6 @@ compute_world_tex_resolution :: (world_size: Vector2, zoom: f32) -> Vector2 {
 }
 
 compile_shader :: (source: string, shader_type: GLenum) -> GLuint {
-    using gl;
     shader := glCreateShader(shader_type);
     src := source.data;
     len : GLint = xx source.count;
@@ -43,8 +41,6 @@ compile_shader :: (source: string, shader_type: GLenum) -> GLuint {
 }
 
 create_shader_program :: (sources: ..Any) -> GLuint {  
-  using gl;
-
   prog := glCreateProgram();
   shaders : [..] GLuint; defer array_free(shaders);
 
@@ -69,7 +65,6 @@ create_shader_program :: (sources: ..Any) -> GLuint {
 }
 
 create_compute_binding :: (particles_count: s64, attraction_matrix: [] f32) -> Compute_Binding {
-  using gl;
   b: Compute_Binding;
   b.shader = create_shader_program(COMPUTE_SHADER, GL_COMPUTE_SHADER);
 
@@ -102,7 +97,6 @@ create_compute_binding :: (particles_count: s64, attraction_matrix: [] f32) -> C
 }
 
 compute_pass :: (using b: Compute_Binding, particles: *Particles, state: Simulation_State) {
-  using gl;
   glUseProgram(shader);
 
   glBindBuffer    (GL_SHADER_STORAGE_BUFFER, pos_ssbo);
@@ -138,7 +132,6 @@ compute_pass :: (using b: Compute_Binding, particles: *Particles, state: Simulat
 }
 
 resize_compute_particle_buffers :: (using b: Compute_Binding, particles: Particles) {
-  using gl;
   glUseProgram(shader);
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, pos_ssbo);
   glBufferData(GL_SHADER_STORAGE_BUFFER, size_of(Vector2) * particles.count, null, GL_DYNAMIC_COPY);
@@ -151,7 +144,6 @@ resize_compute_particle_buffers :: (using b: Compute_Binding, particles: Particl
 }
 
 resize_compute_attraction_buffer :: (using b: Compute_Binding, particles: Particles) {
-  using gl;
   glUseProgram(shader);
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, a_ssbo);
   glBufferData(GL_SHADER_STORAGE_BUFFER, size_of(f32) * particles.atr.count, null, GL_DYNAMIC_COPY);
@@ -160,7 +152,6 @@ resize_compute_attraction_buffer :: (using b: Compute_Binding, particles: Partic
 }
 
 create_tile_binding :: (resolution: Vector2) -> Tile_Binding {
-  using gl;
   using layout: Tile_Binding;
 
   // Framebuffer texture (same as before)
@@ -201,7 +192,6 @@ tile_render_pass :: (
   using state:  Simulation_State,
   camera: Camera,
 ) {
-  using gl;
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glViewport(0, 0, xx window_size.x, xx window_size.y);
   glClearColor(0., 0., 0., 1.);
@@ -223,7 +213,6 @@ tile_render_pass :: (
 }
 
 create_world_binding :: (particles: *Particles) -> World_Binding {
-  using gl;
   using layout :World_Binding;
   glGenVertexArrays(1, *vao);
   glBindVertexArray(vao);
@@ -267,7 +256,6 @@ world_render_pass :: (
   camera:          Camera,
   framebuffer:     GLuint,
 ) {
-  using gl;
   glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
   glViewport(0, 0, xx resolution.x, xx resolution.y);
   glClearColor(0., 0., 0., 1.);
@@ -275,7 +263,6 @@ world_render_pass :: (
 
   glBindBuffer(GL_ARRAY_BUFFER, pos_vbo);
   glBufferData(GL_ARRAY_BUFFER, size_of(Vector2) * count, pos.data, GL_DYNAMIC_DRAW);
-
   glBindBuffer(GL_ARRAY_BUFFER, type_vbo);
   glBufferData(GL_ARRAY_BUFFER, size_of(u32) * count, type.data, GL_DYNAMIC_DRAW);
 
