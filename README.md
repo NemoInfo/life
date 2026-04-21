@@ -1,13 +1,14 @@
 Efficient particle life implementation, writen in JAI with OpenGL, SDL and ImGui.
 
-# Gallery
-<img src="gallery/1.png" width="600">
+![demo](gallery/demo.gif)
 
 # Instructions
-
 ```sh
 $ jai life.jai -o +Autorun
 ```
+
+# Gallery
+![GUI demo](gallery/demo_gui.gif)
 
 # Progress
 ## Featues
@@ -15,7 +16,7 @@ $ jai life.jai -o +Autorun
 - [x] implement 2D Camera, switch to world coordonates
 - [x] attraction laws
 - [x] gui & tools
-- [ ] wasm?
+- [ ] wasm port?
 
 ## Performance:
 - [x] push update to compute shader
