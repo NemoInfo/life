@@ -208,7 +208,7 @@ use_tool :: (target: Vector2, particles: *Particles, state: *Simulation_State, c
       }
     case .Spawn;
       gen_type := (color: s64) -> u32 {
-        if color > 0 return cast(u32) color;
+        if color >= 0 return cast(u32) color;
         return cast,no_check(u32) random_get();
       };
 
