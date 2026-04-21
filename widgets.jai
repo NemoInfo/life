@@ -209,8 +209,8 @@ tool_pointer_gui :: (state: *Simulation_State, camera: Camera, free_id: *s32) {
   if state.tool.type == {
     case .Attract; color = .{0, 1, 0, .5};
     case .Repel;   color = .{1, 0, 0, .5};
-    case .Delete;  color = .{1, 0, 0, .5};
-    case .Spawn;   color = .{0, 1, 1, .5};
+    case .Delete;  color = .{0.239, 0.012, 0.98, .5};
+    case .Spawn;   color = .{0.969, 0.6, 0.012, .5};
   }
   if state.tool.type == .Attract || state.tool.type == .Repel
     circle_shape_pointer(state, camera, color);
@@ -244,24 +244,24 @@ tool_gui :: (state: *Simulation_State, particles: *Particles, camera: Camera, fr
 }
 
 
-simulation_tools_gui :: (state: *Simulation_State, particles: *Particles, camera: Camera, free_id: *s32, compute_binding: Compute_Binding) {
-  if ImGui.Begin("Simulation Tools", null, /*ImGui.WindowFlags.NoTitleBar |*/ ImGui.WindowFlags.AlwaysAutoResize) {
+simulation_dev_gui :: (using state: *Simulation_State, using particles: *Particles, camera: *Camera, free_id: *s32, compute_binding: Compute_Binding) {
+  if ImGui.Begin("Simulation Tools", null, .AlwaysAutoResize) {
     info_gui(state, particles, camera, free_id);
 
     ImGui.InputFloat2("Camera position", *camera.pos.component); 
-    if ImGui.Button("Reset All") init_simulation(particles, state, particles.count, particles.num_types);
+    if ImGui.Button("Reset All") init_simulation(particles, world_size, count, num_types);
     ImGui.SameLine();
-    if ImGui.Button("Reset Positions") randomize_particle_positions(particles, state);
+    if ImGui.Button("Reset Positions") randomize_particle_positions(particles, world_size);
     ImGui.SameLine();
     if ImGui.Button("Reset Colors") randomize_particle_colors(particles);
 
     attraction_matrix_gui(state, particles, free_id, compute_binding);
 
-    if ImGui.BeginCombo("Tool", TOOL_NAMES[state.tool.type].data) {
+    if ImGui.BeginCombo("Tool", TOOL_NAMES[tool.type].data) {
       for TOOL_NAMES {
-        is_selected := xx state.tool.type == it_index;
+        is_selected := xx tool.type == it_index;
         if ImGui.Selectable(it.data, is_selected)
-        state.tool.type = xx it_index;
+        tool.type = xx it_index;
         if is_selected ImGui.SetItemDefaultFocus();
       }
       ImGui.EndCombo();
@@ -278,4 +278,3 @@ SelectableColor :: (color: ImGui.ImU32 )
   p_max := ImGui.GetItemRectMax();
   ImGui.ImDrawList.AddRectFilled(ImGui.GetWindowDrawList(), p_min, p_max, color);
 }
-

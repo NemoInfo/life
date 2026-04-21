@@ -26,7 +26,7 @@ $ jai life.jai -o +Autorun
 - [x] fix render to texture pipeline, 
       think about how to tie tile resolution to camera zoom
 - [x] break the monolith, refactor game loop
-- [ ] betteer attraction / reppeleer force profile 
+- [ ] betteer attraction / reppeler force profile 
 - [ ] refactor tiling logic, 
       i think it should be slightly simpler
 - [ ] async logging

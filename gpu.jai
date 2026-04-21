@@ -1,3 +1,29 @@
+Compute_Binding :: struct {
+  pos_ssbo: GLuint;
+  vel_ssbo: GLuint;
+  type_ssbo: GLuint;
+  a_ssbo:   GLuint;
+  shader:   GLuint;
+}
+
+World_Binding :: struct {
+  vao:        GLuint;
+  quad_vbo:   GLuint;
+  pos_vbo:    GLuint;
+  type_vbo:   GLuint;
+  color_ssbo: GLuint;
+  shader:     GLuint;
+}
+
+Tile_Binding :: struct {
+  framebuffer:   GLuint;
+  world_texture: GLuint;
+  quad_vao:      GLuint;
+  quad_vbo:      GLuint;
+  shader:        GLuint;
+}
+
+
 maybe_resize_world_texture :: (tile: *Tile_Binding, resolution: *Vector2, world_size: Vector2, zoom: f32) {
     target := compute_world_tex_resolution(world_size, zoom);
     if target == resolution.* return;
@@ -40,15 +66,13 @@ compile_shader :: (source: string, shader_type: GLenum) -> GLuint {
     return shader;
 }
 
-create_shader_program :: (sources: ..Any) -> GLuint {  
+Shader :: struct { source: string; type: GLenum; };
+create_shader_program :: (sources: ..Shader) -> GLuint {  
   prog := glCreateProgram();
   shaders : [..] GLuint; defer array_free(shaders);
 
-  for i: 0..sources.count/2-1 {
-    assert(sources[2*i].type == type_info(string));
-    assert(sources[2*i+1].type.*.type == .INTEGER && sources[2*i+1].type.*.runtime_size == 8);
-
-    shader := compile_shader((cast(*string) sources[2*i].value_pointer).*, (cast(*GLenum) sources[2*i+1].value_pointer).*);
+  for sources {
+    shader := compile_shader(it.source, it.type);
     glAttachShader(prog, shader);
     array_add(*shaders, shader);
   }
@@ -66,7 +90,7 @@ create_shader_program :: (sources: ..Any) -> GLuint {
 
 create_compute_binding :: (particles_count: s64, attraction_matrix: [] f32) -> Compute_Binding {
   b: Compute_Binding;
-  b.shader = create_shader_program(COMPUTE_SHADER, GL_COMPUTE_SHADER);
+  b.shader = create_shader_program(.{ COMPUTE_SHADER, GL_COMPUTE_SHADER });
 
   // location = 0 pos Vector2
   glGenBuffers     (1, *b.pos_ssbo);
@@ -181,7 +205,7 @@ create_tile_binding :: (resolution: Vector2) -> Tile_Binding {
   glBindVertexArray(0);
 
   // Compile tile shaders
-  layout.shader = create_shader_program(TILE_VS, GL_VERTEX_SHADER, TILE_FS, GL_FRAGMENT_SHADER);
+  layout.shader = create_shader_program(.{ TILE_VS, GL_VERTEX_SHADER }, .{ TILE_FS, GL_FRAGMENT_SHADER });
 
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   return layout;
@@ -245,7 +269,7 @@ create_world_binding :: (particles: *Particles) -> World_Binding {
   glBindBufferBase (GL_SHADER_STORAGE_BUFFER, 4, color_ssbo);
 
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-  shader = create_shader_program(WORLD_VS, GL_VERTEX_SHADER, WORLD_FS, GL_FRAGMENT_SHADER);
+  shader = create_shader_program(.{ WORLD_VS, GL_VERTEX_SHADER }, { WORLD_FS, GL_FRAGMENT_SHADER });
   return layout;
 }
 
